@@ -4,10 +4,12 @@ macro_rules! tools {
         $(mod $lowercase;)+
         $(pub use $lowercase::$capitalized;)+
 
-        #[derive(Debug, $crate::serde::Serialize, $crate::serde::Deserialize)]
+        #[derive(Debug, $crate::serde::Serialize, $crate::serde::Deserialize, $crate::clap::Subcommand)]
         #[serde(tag = "name")]
         pub enum Tools {
-            $(#[serde(rename = $string)] $capitalized { arguments: $capitalized },)+
+            $(
+              #[serde(rename = $string)] $capitalized { #[clap(flatten)]  arguments: $capitalized },
+            )+
         }
 
         impl $crate::traits::Tool<$state> for Tools {

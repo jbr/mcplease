@@ -5,6 +5,8 @@ pub mod traits;
 pub mod types;
 
 pub use anyhow;
+pub use clap;
+use clap::{Parser, Subcommand};
 pub use serde;
 pub use serde_json;
 
@@ -23,27 +25,11 @@ use crate::{
     types::Info,
 };
 
-pub fn run<Tools: AsToolsList + Tool<State>, State>(
+fn serve<Tools: AsToolsList + Tool<State>, State>(
     state: &mut State,
     server_info: Info,
     instructions: Option<&'static str>,
 ) -> Result<()> {
-    if let Ok(log_location) = std::env::var("MCP_LOG_LOCATION") {
-        let path = PathBuf::from(&*shellexpand::tilde(&log_location));
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        Builder::from_default_env()
-            .target(Target::Pipe(Box::new(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .unwrap(),
-            )))
-            .init();
-    }
-
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin);
@@ -79,6 +65,50 @@ pub fn run<Tools: AsToolsList + Tool<State>, State>(
             Err(e) => {
                 log::error!("Error reading line: {e}");
                 break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(clap::Parser)]
+struct Cli<T: Subcommand> {
+    #[command(subcommand)]
+    tool: T,
+}
+
+pub fn run<Tools: Subcommand + AsToolsList + Tool<State>, State>(
+    state: &mut State,
+    server_info: Info,
+    instructions: Option<&'static str>,
+) -> Result<()> {
+    if let Ok(log_location) = std::env::var("MCP_LOG_LOCATION") {
+        let path = PathBuf::from(&*shellexpand::tilde(&log_location));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        Builder::from_default_env()
+            .target(Target::Pipe(Box::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .unwrap(),
+            )))
+            .init();
+    }
+
+    match Cli::<Tools>::try_parse() {
+        Ok(Cli { tool }) => {
+            let result = tool.execute(state)?;
+            println!("{result}");
+        }
+        Err(e) => {
+            if std::env::args().nth(1).as_deref() == Some("serve") {
+                serve::<Tools, State>(state, server_info, instructions)?;
+            } else {
+                println!("{e}");
             }
         }
     }
