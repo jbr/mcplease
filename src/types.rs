@@ -48,20 +48,27 @@ impl McpRequest {
                 id,
                 InitializeResponse::new(server_info.to_owned()).with_instructions(instructions),
             ),
-            "tools/list" => McpResponse::success(
-                id,
-                ToolsListResponse {
-                    tools: Tools::tools_list(),
-                },
-            ),
+            "tools/list" => {
+                let tools = Tools::tools_list();
+                McpResponse::success(id, ToolsListResponse { tools })
+            }
             "tools/call" => match serde_json::from_value::<Tools>(params.unwrap_or(Value::Null)) {
                 Ok(tool) => match tool.execute(state) {
-                    Ok(string) => McpResponse::success(id, ContentResponse::text(string)),
-                    Err(e) => McpResponse::error(id, -32601, e.to_string()),
+                    Ok(string) => {
+                        log::debug!("{string}");
+                        McpResponse::success(id, ContentResponse::text(string))
+                    }
+                    Err(e) => {
+                        log::error!("{e}");
+                        McpResponse::error(id, e.to_string())
+                    }
                 },
-                Err(e) => McpResponse::error(id, -32601, e.to_string()),
+                Err(e) => {
+                    log::error!("{e}");
+                    McpResponse::error(id, e.to_string())
+                }
             },
-            _ => McpResponse::error(id, -32601, format!("Unknown method: {method}")),
+            _ => McpResponse::error(id, format!("Unknown method: {method}")),
         }
     }
 }
@@ -266,13 +273,13 @@ impl McpResponse {
         }
     }
 
-    pub fn error(id: Value, code: i32, message: String) -> Self {
+    pub fn error(id: Value, message: String) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
             result: None,
             error: Some(McpError {
-                code,
+                code: -32601,
                 message,
                 data: None,
             }),
