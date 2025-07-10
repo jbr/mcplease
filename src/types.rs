@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug};
 
 use crate::traits::{AsToolsList, Tool};
 
@@ -34,7 +34,7 @@ pub struct McpRequest {
 }
 
 impl McpRequest {
-    pub fn execute<State, Tools: AsToolsList + Tool<State>>(
+    pub fn execute<State, Tools: Debug + AsToolsList + Tool<State>>(
         self,
         state: &mut State,
         instructions: Option<&'static str>,
@@ -53,16 +53,19 @@ impl McpRequest {
                 McpResponse::success(id, ToolsListResponse { tools })
             }
             "tools/call" => match serde_json::from_value::<Tools>(params.unwrap_or(Value::Null)) {
-                Ok(tool) => match tool.execute(state) {
-                    Ok(string) => {
-                        log::debug!("{string}");
-                        McpResponse::success(id, ContentResponse::text(string))
+                Ok(tool) => {
+                    log::info!("{tool:?}");
+                    match tool.execute(state) {
+                        Ok(string) => {
+                            log::debug!("{string}");
+                            McpResponse::success(id, ContentResponse::text(string))
+                        }
+                        Err(e) => {
+                            log::error!("{e}");
+                            McpResponse::error(id, e.to_string())
+                        }
                     }
-                    Err(e) => {
-                        log::error!("{e}");
-                        McpResponse::error(id, e.to_string())
-                    }
-                },
+                }
                 Err(e) => {
                     log::error!("{e}");
                     McpResponse::error(id, e.to_string())

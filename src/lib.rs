@@ -11,6 +11,7 @@ pub use serde;
 pub use serde_json;
 
 use std::{
+    fmt::Debug,
     fs::OpenOptions,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
@@ -25,7 +26,7 @@ use crate::{
     types::Info,
 };
 
-fn serve<Tools: AsToolsList + Tool<State>, State>(
+fn serve<Tools: Debug + AsToolsList + Tool<State>, State>(
     state: &mut State,
     server_info: Info,
     instructions: Option<&'static str>,
@@ -78,7 +79,7 @@ struct Cli<T: Subcommand> {
     tool: T,
 }
 
-pub fn run<Tools: Subcommand + AsToolsList + Tool<State>, State>(
+pub fn run<Tools: Debug + Subcommand + AsToolsList + Tool<State>, State>(
     state: &mut State,
     server_info: Info,
     instructions: Option<&'static str>,

@@ -4,11 +4,19 @@ macro_rules! tools {
         $(mod $lowercase;)+
         $(pub use $lowercase::$capitalized;)+
 
-        #[derive(Debug, $crate::clap::Subcommand)]
+        #[derive($crate::clap::Subcommand)]
         pub enum Tools {
             $(
                 $capitalized(#[clap(flatten)] $capitalized),
             )+
+        }
+
+        impl std::fmt::Debug for Tools {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $(Self::$capitalized(tool) => std::fmt::Debug::fmt(tool, f),)+
+                }
+            }
         }
 
         // Simple Deserialize implementation using serde_json::Value
