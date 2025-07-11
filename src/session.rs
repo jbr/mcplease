@@ -127,8 +127,7 @@ where
                                 let new_value = current.saturating_sub(1);
                                 ignore_next_events.store(new_value, Ordering::Relaxed);
                                 log::trace!(
-                                    "ignoring event from our own write (remaining: {})",
-                                    new_value
+                                    "ignoring event from our own write (remaining: {new_value})"
                                 );
                                 return; // Skip this event - it's from our own write
                             }

@@ -109,7 +109,7 @@ pub fn run<Tools: Debug + Subcommand + AsToolsList + Tool<State>, State>(
             if std::env::args().nth(1).as_deref() == Some("serve") {
                 serve::<Tools, State>(state, server_info, instructions)?;
             } else {
-                println!("{e}");
+                eprintln!("{e}");
             }
         }
     }
