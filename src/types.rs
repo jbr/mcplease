@@ -170,11 +170,12 @@ pub enum Tagged {
         description: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        #[serde(default)]
         properties: HashMap<String, Box<InputSchema>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         required: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        additional_properties: Option<bool>,
+        additional_properties: Option<Box<InputSchema>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         examples: Option<Vec<Value>>,
     },

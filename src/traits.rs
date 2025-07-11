@@ -78,7 +78,16 @@ where
             );
         }
 
-        let input_schema = serde_json::from_value(schema.into()).unwrap();
+        let value: Value = schema.into();
+        let input_schema = match serde_json::from_value(value.clone()) {
+            Ok(input_schema) => input_schema,
+            Err(e) => {
+                let json = serde_json::to_string_pretty(&value).unwrap();
+                log::error!("could not parse input schema:\n{e}\n\n{json}");
+                eprintln!("could not parse input schema:\n{e}\n\n{json}");
+                panic!("{e}");
+            }
+        };
 
         ToolSchema {
             name,
