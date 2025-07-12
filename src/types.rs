@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug};
 
 use crate::traits::{AsToolsList, Tool};
 
@@ -34,7 +34,7 @@ pub struct McpRequest {
 }
 
 impl McpRequest {
-    pub fn execute<State, Tools: AsToolsList + Tool<State>>(
+    pub fn execute<State, Tools: Debug + AsToolsList + Tool<State>>(
         self,
         state: &mut State,
         instructions: Option<&'static str>,
@@ -48,20 +48,30 @@ impl McpRequest {
                 id,
                 InitializeResponse::new(server_info.to_owned()).with_instructions(instructions),
             ),
-            "tools/list" => McpResponse::success(
-                id,
-                ToolsListResponse {
-                    tools: Tools::tools_list(),
-                },
-            ),
+            "tools/list" => {
+                let tools = Tools::tools_list();
+                McpResponse::success(id, ToolsListResponse { tools })
+            }
             "tools/call" => match serde_json::from_value::<Tools>(params.unwrap_or(Value::Null)) {
-                Ok(tool) => match tool.execute(state) {
-                    Ok(string) => McpResponse::success(id, ContentResponse::text(string)),
-                    Err(e) => McpResponse::error(id, -32601, e.to_string()),
-                },
-                Err(e) => McpResponse::error(id, -32601, e.to_string()),
+                Ok(tool) => {
+                    log::info!("{tool:?}");
+                    match tool.execute(state) {
+                        Ok(string) => {
+                            log::debug!("{string}");
+                            McpResponse::success(id, ContentResponse::text(string))
+                        }
+                        Err(e) => {
+                            log::error!("{e}");
+                            McpResponse::error(id, e.to_string())
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("{e}");
+                    McpResponse::error(id, e.to_string())
+                }
             },
-            _ => McpResponse::error(id, -32601, format!("Unknown method: {method}")),
+            _ => McpResponse::error(id, format!("Unknown method: {method}")),
         }
     }
 }
@@ -160,11 +170,12 @@ pub enum Tagged {
         description: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        #[serde(default)]
         properties: HashMap<String, Box<InputSchema>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         required: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        additional_properties: Option<bool>,
+        additional_properties: Option<Box<InputSchema>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         examples: Option<Vec<Value>>,
     },
@@ -266,13 +277,13 @@ impl McpResponse {
         }
     }
 
-    pub fn error(id: Value, code: i32, message: String) -> Self {
+    pub fn error(id: Value, message: String) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
             result: None,
             error: Some(McpError {
-                code,
+                code: -32601,
                 message,
                 data: None,
             }),
