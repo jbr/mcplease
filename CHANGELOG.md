@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jbr/mcplease/compare/v0.1.0...v0.2.0) - 2025-07-12
+
+### Added
+
+- print to stderr
+- require Debug from tools explicitly
+- improve clap and debugging
+- add cli interface
+- sessions are reloaded when needed
+
+### Fixed
+
+- input schema parsing
+
+### Other
+
+- don't run coverage currently
+
 ## [0.1.0](https://github.com/jbr/mcplease/releases/tag/v0.1.0) - 2025-06-29
 
 ### Added
