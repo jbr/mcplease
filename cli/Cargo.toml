@@ -20,6 +20,7 @@ quote = "1.0"
 prettyplease = "0.2"
 heck = "0.5"
 proc-macro2 = "1.0"
+semver = "1.0.26"
 
 [dev-dependencies]
 mcplease = { path = ".." }

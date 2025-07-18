@@ -1,14 +1,18 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use heck::{ToPascalCase, ToSnakeCase};
-use prettyplease;
+use proc_macro2::Span;
 use quote::{format_ident, quote};
-use std::fs;
 use std::path::PathBuf;
+use std::{fs, path::Path};
+use syn::parse::ParseStream;
 use syn::{
-    File, Item, ItemImpl, ItemStruct, Token, parse::Parse, parse_quote, parse2,
-    punctuated::Punctuated,
+    File, Ident, Item, ItemImpl, ItemMacro, ItemStruct, LitStr, Token, parenthesized, parse::Parse,
+    parse_quote, parse2, punctuated::Punctuated,
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Parser)]
 #[command(name = "mcplease")]
@@ -49,7 +53,6 @@ enum Commands {
     /// Add a new tool to an existing project
     Add {
         /// Tool name to add
-        #[arg(long)]
         tool: String,
     },
 }
@@ -69,10 +72,7 @@ fn main() -> Result<()> {
             let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
 
             if output_dir.exists() {
-                return Err(anyhow::anyhow!(
-                    "Directory {} already exists",
-                    output_dir.display()
-                ));
+                return Err(anyhow!("Directory {} already exists", output_dir.display()));
             }
 
             create_project(
@@ -88,19 +88,24 @@ fn main() -> Result<()> {
 
             println!("✅ Created MCP server project: {}", output_dir.display());
             println!("📁 Project structure:");
-            println!("   {}/", name);
+            println!("   {name}/");
             println!("   ├── Cargo.toml");
             println!("   └── src/");
             println!("       ├── main.rs");
             println!("       ├── state.rs");
             println!("       ├── tools.rs");
             println!("       └── tools/");
-            for tool in &tools {
-                println!("           ├── {}.rs", tool.to_snake_case());
+            for (n, tool) in tools.iter().enumerate() {
+                let snake_case = tool.to_snake_case();
+                if n == tools.len() - 1 {
+                    println!("           └── {snake_case}.rs");
+                } else {
+                    println!("           ├── {snake_case}.rs");
+                }
             }
             println!();
             println!("🚀 Next steps:");
-            println!("   cd {}", name);
+            println!("   cd {name}");
             println!("   cargo check  # Verify everything compiles");
             println!("   cargo run serve  # Start the MCP server");
 
@@ -116,19 +121,19 @@ fn main() -> Result<()> {
 // Custom parser for the tools! macro arguments
 #[derive(Debug)]
 struct ToolsMacroArgs {
-    state_type: syn::Ident,
+    state_type: Ident,
     tools: Punctuated<ToolEntry, Token![,]>,
 }
 
 #[derive(Clone, Debug)]
 struct ToolEntry {
-    struct_name: syn::Ident,
-    mod_name: syn::Ident,
-    string_name: syn::LitStr,
+    struct_name: Ident,
+    mod_name: Ident,
+    string_name: LitStr,
 }
 
 impl Parse for ToolsMacroArgs {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
         let state_type = input.parse()?;
         input.parse::<Token![,]>()?;
 
@@ -139,9 +144,9 @@ impl Parse for ToolsMacroArgs {
 }
 
 impl Parse for ToolEntry {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
         let content;
-        syn::parenthesized!(content in input);
+        parenthesized!(content in input);
 
         let struct_name = content.parse()?;
         content.parse::<Token![,]>()?;
@@ -157,9 +162,9 @@ impl Parse for ToolEntry {
     }
 }
 
-fn find_tools_macro(file: &syn::File) -> Option<&syn::ItemMacro> {
+fn find_tools_macro(file: &File) -> Option<&ItemMacro> {
     file.items.iter().find_map(|item| {
-        if let syn::Item::Macro(mac) = item {
+        if let Item::Macro(mac) = item {
             // Check for both "tools" and "mcplease::tools"
             if mac.mac.path.is_ident("tools")
                 || (mac.mac.path.segments.len() == 2
@@ -175,7 +180,7 @@ fn find_tools_macro(file: &syn::File) -> Option<&syn::ItemMacro> {
     })
 }
 
-fn format_tools_file(project_path: &PathBuf) -> Result<()> {
+fn format_tools_file(project_path: &Path) -> Result<()> {
     use std::process::Command;
 
     let output = Command::new("cargo")
@@ -188,7 +193,7 @@ fn format_tools_file(project_path: &PathBuf) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("cargo fmt failed: {}", stderr));
+        return Err(anyhow!("cargo fmt failed: {}", stderr));
     }
 
     Ok(())
@@ -202,7 +207,7 @@ fn add_tool_to_project_impl(tool_name: &str, project_path: Option<&std::path::Pa
     // 1. Check if we're in a project directory
     let tools_rs_path = base_path.join("src/tools.rs");
     if !tools_rs_path.exists() {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow!(
             "No src/tools.rs found at {}. Run this command from the root of an mcplease project.",
             tools_rs_path.display()
         ));
@@ -211,11 +216,11 @@ fn add_tool_to_project_impl(tool_name: &str, project_path: Option<&std::path::Pa
     // 2. Parse tools.rs
     let tools_content =
         fs::read_to_string(&tools_rs_path).context("Failed to read src/tools.rs")?;
-    let file: syn::File = syn::parse_str(&tools_content).context("Failed to parse src/tools.rs")?;
+    let file: File = syn::parse_str(&tools_content).context("Failed to parse src/tools.rs")?;
 
     // 3. Find the tools! macro
-    let tools_macro = find_tools_macro(&file)
-        .ok_or_else(|| anyhow::anyhow!("No tools! macro found in src/tools.rs"))?;
+    let tools_macro =
+        find_tools_macro(&file).ok_or_else(|| anyhow!("No tools! macro found in src/tools.rs"))?;
 
     // 4. Parse the macro arguments
     let mut args: ToolsMacroArgs =
@@ -228,14 +233,14 @@ fn add_tool_to_project_impl(tool_name: &str, project_path: Option<&std::path::Pa
         .iter()
         .any(|t| t.string_name.value() == snake_name)
     {
-        return Err(anyhow::anyhow!("Tool '{}' already exists", tool_name));
+        return Err(anyhow!("Tool '{}' already exists", tool_name));
     }
 
     // 6. Add the new tool
     let new_tool = ToolEntry {
         struct_name: format_ident!("{}", tool_name.to_pascal_case()),
         mod_name: format_ident!("{}", snake_name),
-        string_name: syn::LitStr::new(&snake_name, proc_macro2::Span::call_site()),
+        string_name: LitStr::new(&snake_name, Span::call_site()),
     };
     args.tools.push(new_tool);
 
@@ -246,17 +251,14 @@ fn add_tool_to_project_impl(tool_name: &str, project_path: Option<&std::path::Pa
 
     // 8. Format the file with cargo fmt for better macro formatting
     format_tools_file(&base_path).unwrap_or_else(|e| {
-        eprintln!(
-            "Warning: cargo fmt failed ({}), but file was generated successfully",
-            e
-        );
+        eprintln!("Warning: cargo fmt failed ({e}), but file was generated successfully");
     });
 
     // 9. Generate the tool file
     generate_tool_file(tool_name, &args.state_type.to_string(), &base_path)?;
 
-    println!("✅ Added tool '{}' to the project", tool_name);
-    println!("📁 Generated: src/tools/{}.rs", snake_name);
+    println!("✅ Added tool '{tool_name}' to the project");
+    println!("📁 Generated: src/tools/{snake_name}.rs");
     println!("🔧 Updated: src/tools.rs");
 
     Ok(())
@@ -271,7 +273,7 @@ fn add_tool_to_project_at_path(tool_name: &str, project_path: &std::path::Path) 
     add_tool_to_project_impl(tool_name, Some(project_path))
 }
 
-fn regenerate_tools_file(original: &syn::File, args: &ToolsMacroArgs) -> Result<syn::File> {
+fn regenerate_tools_file(original: &File, args: &ToolsMacroArgs) -> Result<File> {
     let mut new_items = Vec::new();
 
     // Copy all non-macro items
@@ -305,7 +307,7 @@ fn regenerate_tools_file(original: &syn::File, args: &ToolsMacroArgs) -> Result<
     };
 
     // Create the macro item
-    let tools_macro_item = syn::Item::Macro(syn::ItemMacro {
+    let tools_macro_item = Item::Macro(ItemMacro {
         attrs: vec![],
         ident: None,
         mac: syn::Macro {
@@ -319,7 +321,7 @@ fn regenerate_tools_file(original: &syn::File, args: &ToolsMacroArgs) -> Result<
 
     new_items.push(tools_macro_item);
 
-    Ok(syn::File {
+    Ok(File {
         shebang: original.shebang.clone(),
         attrs: original.attrs.clone(),
         items: new_items,
@@ -334,7 +336,7 @@ pub struct CreateOptions<'a> {
     pub instructions: Option<&'a str>,
 }
 
-pub fn create_project(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+pub fn create_project(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     // Create directory structure
     fs::create_dir_all(output_dir)?;
     fs::create_dir_all(output_dir.join("src"))?;
@@ -354,10 +356,13 @@ pub fn create_project(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> 
     Ok(())
 }
 
-fn generate_cargo_toml(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_cargo_toml(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let description = opts
         .description
         .unwrap_or("An MCP server built with mcplease");
+
+    let mcplease_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+    let mcplease_version = format!("{}.{}", mcplease_version.major, mcplease_version.minor);
 
     let content = format!(
         r#"[package]
@@ -367,16 +372,12 @@ edition = "2024"
 description = "{description}"
 
 [dependencies]
-anyhow = "1.0"
+anyhow = "1"
 clap = {{ version = "4.5", features = ["derive"] }}
-mcplease = "0.2.0"
-schemars = "1.0.4"
+mcplease = "{mcplease_version}"
+schemars = "1"
 serde = {{ version = "1.0", features = ["derive"] }}
-serde_json = "1.0"
-
-# Uncomment if you want to use the development version of mcplease
-# [patch.crates-io]
-# mcplease = {{ path = "../mcplease" }}
+serde_json = "1"
 "#,
         name = opts.name,
         description = description
@@ -387,7 +388,7 @@ serde_json = "1.0"
     Ok(())
 }
 
-fn generate_main_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_main_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let state_ident = format_ident!("{}", opts.state);
     let instructions = opts
         .instructions
@@ -415,7 +416,7 @@ fn generate_main_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn generate_state_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_state_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let state_ident = format_ident!("{}", opts.state);
 
     let file: File = parse_quote! {
@@ -448,7 +449,7 @@ fn generate_state_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn generate_tools_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_tools_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let state_ident = format_ident!("{}", opts.state);
 
     // Only generate the use statement for the state - the tools! macro handles mod declarations
@@ -489,16 +490,13 @@ fn generate_tools_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
 
     // Format the file with cargo fmt for better macro formatting
     format_tools_file(output_dir).unwrap_or_else(|e| {
-        eprintln!(
-            "Warning: cargo fmt failed ({}), but file was generated successfully",
-            e
-        );
+        eprintln!("Warning: cargo fmt failed ({e}), but file was generated successfully");
     });
 
     Ok(())
 }
 
-fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &PathBuf) -> Result<()> {
+fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &Path) -> Result<()> {
     let tool_ident = format_ident!("{}", tool_name.to_pascal_case());
     let state_ident = format_ident!("{}", state_name);
     let snake_name = tool_name.to_snake_case();
@@ -555,12 +553,9 @@ fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &PathBuf) -
     };
 
     let content = prettyplease::unparse(&file);
-    let filename = format!("{}.rs", snake_name);
+    let filename = format!("{snake_name}.rs");
     fs::write(output_dir.join("src/tools").join(filename), content)
-        .with_context(|| format!("Failed to write tool file for {}", tool_name))?;
+        .with_context(|| format!("Failed to write tool file for {tool_name}"))?;
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;
