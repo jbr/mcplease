@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/jbr/mcplease/compare/mcplease-v0.2.2...mcplease-v0.2.3) - 2025-07-18
+
+### Other
+
+- tweaks to cli interface, code tidying
+
 ## [0.2.1](https://github.com/jbr/mcplease/compare/mcplease-v0.2.0...mcplease-v0.2.1) - 2025-07-18
 
 ### Added
