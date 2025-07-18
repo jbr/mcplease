@@ -87,7 +87,7 @@ fn main() -> Result<()> {
 
             println!("✅ Created MCP server project: {}", output_dir.display());
             println!("📁 Project structure:");
-            println!("   {}/", name);
+            println!("   {name}/");
             println!("   ├── Cargo.toml");
             println!("   └── src/");
             println!("       ├── main.rs");
@@ -99,7 +99,7 @@ fn main() -> Result<()> {
             }
             println!();
             println!("🚀 Next steps:");
-            println!("   cd {}", name);
+            println!("   cd {name}");
             println!("   cargo check  # Verify everything compiles");
             println!("   cargo run serve  # Start the MCP server");
 
@@ -246,16 +246,15 @@ fn add_tool_to_project_impl(tool_name: &str, project_path: Option<&std::path::Pa
     // 8. Format the file with cargo fmt for better macro formatting
     format_tools_file(&base_path).unwrap_or_else(|e| {
         eprintln!(
-            "Warning: cargo fmt failed ({}), but file was generated successfully",
-            e
+            "Warning: cargo fmt failed ({e}), but file was generated successfully"
         );
     });
 
     // 9. Generate the tool file
     generate_tool_file(tool_name, &args.state_type.to_string(), &base_path)?;
 
-    println!("✅ Added tool '{}' to the project", tool_name);
-    println!("📁 Generated: src/tools/{}.rs", snake_name);
+    println!("✅ Added tool '{tool_name}' to the project");
+    println!("📁 Generated: src/tools/{snake_name}.rs");
     println!("🔧 Updated: src/tools.rs");
 
     Ok(())
@@ -489,8 +488,7 @@ fn generate_tools_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
     // Format the file with cargo fmt for better macro formatting
     format_tools_file(output_dir).unwrap_or_else(|e| {
         eprintln!(
-            "Warning: cargo fmt failed ({}), but file was generated successfully",
-            e
+            "Warning: cargo fmt failed ({e}), but file was generated successfully"
         );
     });
 
@@ -554,9 +552,9 @@ fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &PathBuf) -
     };
 
     let content = prettyplease::unparse(&file);
-    let filename = format!("{}.rs", snake_name);
+    let filename = format!("{snake_name}.rs");
     fs::write(output_dir.join("src/tools").join(filename), content)
-        .with_context(|| format!("Failed to write tool file for {}", tool_name))?;
+        .with_context(|| format!("Failed to write tool file for {tool_name}"))?;
 
     Ok(())
 }
