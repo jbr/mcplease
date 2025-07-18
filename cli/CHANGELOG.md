@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jbr/mcplease/releases/tag/mcplease-cli-v0.2.0) - 2025-07-18
+
+### Added
+
+- add mcplease-cli
+
+### Other
+
+- get the cli onto the same minor version as the library
+- release
+
 ## [0.1.0](https://github.com/jbr/mcplease/releases/tag/mcplease-cli-v0.1.0) - 2025-07-18
 
 ### Added
