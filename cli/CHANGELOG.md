@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/jbr/mcplease/compare/mcplease-cli-v0.2.0...mcplease-cli-v0.2.1) - 2025-07-18
+
+### Other
+
+- Merge pull request #9 from jbr/code-tidying
+- tweaks to cli interface, code tidying
+- deref &PathBuf to &Path
+- clippy
+- remove unused import
+
 ## [0.2.0](https://github.com/jbr/mcplease/releases/tag/mcplease-cli-v0.2.0) - 2025-07-18
 
 ### Added
