@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use heck::{ToPascalCase, ToSnakeCase};
-use prettyplease;
 use quote::{format_ident, quote};
 use std::fs;
 use std::path::PathBuf;
