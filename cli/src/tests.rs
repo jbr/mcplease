@@ -90,7 +90,7 @@ fn test_cargo_toml_generation() {
 
     assert!(content.contains("name = \"my-test-server\""));
     assert!(content.contains("description = \"Custom description\""));
-    assert!(content.contains("mcplease = \"0.2.0\""));
+    assert!(content.contains("mcplease = \"0.2\""));
 }
 
 #[test]

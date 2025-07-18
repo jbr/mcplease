@@ -65,22 +65,22 @@ my-server/
 Adds a new tool to an existing MCP server project.
 
 ```bash
-mcplease add --tool <TOOL_NAME>
+mcplease add <TOOL_NAME>
 ```
 
-**Options:**
-- `--tool <TOOL_NAME>` - Name of the tool to add
+**Arguments:**
+- `<TOOL_NAME>` - Name of the tool to add
 
 **Examples:**
 
 ```bash
 # Add a single tool
-mcplease add --tool health_check
+mcplease add health_check
 
 # Add multiple tools (run multiple times)
-mcplease add --tool ping
-mcplease add --tool version
-mcplease add --tool metrics
+mcplease add ping
+mcplease add version
+mcplease add metrics
 ```
 
 **What it does:**
@@ -229,8 +229,8 @@ cargo run status
 ### 5. Add More Tools
 
 ```bash
-mcplease add --tool goodbye
-mcplease add --tool version
+mcplease add goodbye
+mcplease add version
 ```
 
 ## Best Practices
@@ -404,8 +404,8 @@ mcplease create db-server \
   --state DatabaseState
 
 cd db-server
-mcplease add --tool backup
-mcplease add --tool restore
+mcplease add backup
+mcplease add restore
 ```
 
 ---

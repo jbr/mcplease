@@ -1,6 +1,8 @@
 # MCPlease
 
-MCPlease is a lightweight Rust framework for building MCP (Model Context Protocol) servers. It provides a simple, macro-driven approach to defining tools and managing state, with built-in support for session persistence and cross-process synchronization.
+MCPlease is a lightweight Rust framework for building MCP (Model Context Protocol) servers. It
+provides a simple, macro-driven approach to defining tools and managing state, with optional support
+for session persistence and cross-process synchronization.
 
 ## Features
 
@@ -27,8 +29,8 @@ mcplease create my-server --tools hello,goodbye,status --state MyServerState
 cd my-server
 
 # Add more tools as needed
-mcplease add --tool health_check
-mcplease add --tool ping
+mcplease add health_check
+mcplease add ping
 
 # Test that it compiles
 cargo check
@@ -318,30 +320,6 @@ let maybe_data = store.get("session_id")?;
 // Set directly
 store.set("session_id", new_data)?;
 ```
-
-## Example MCP Servers
-
-The framework includes several reference implementations:
-
-### fs-mcp (Filesystem Operations)
-- **Tools**: read, write, delete, move, list, search, set_working_directory
-- **Features**: Glob patterns, metadata, recursive operations
-- **Session data**: Working directory context
-
-### cargo-mcp (Rust Project Management)
-- **Tools**: build, test, check, clippy, add/remove deps, clean, bench
-- **Features**: Toolchain selection, package targeting, environment variables
-- **Session data**: Project directory
-
-### semantic-edit-mcp (Code Editing)
-- **Tools**: preview_edit, retarget_edit, persist_edit, set_working_directory  
-- **Features**: AST-aware editing, language detection, diff preview
-- **Session data**: Staged operations, working directory
-
-### rustdoc-json-mcp (Documentation)
-- **Tools**: get_item, set_working_directory
-- **Features**: Rustdoc JSON parsing, type information, source code
-- **Session data**: Project manifest directory
 
 ## Advanced Features
 
