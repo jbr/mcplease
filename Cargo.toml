@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "cli"]
+resolver = "2"
+
 [package]
 name = "mcplease"
 version = "0.2.0"
@@ -12,6 +16,7 @@ categories = ["development-tools"]
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.41", features = ["derive"] }
+dirs = "6.0.0"
 env_logger = "0.11.8"
 fieldwork = "0.4.6"
 log = "0.4.27"

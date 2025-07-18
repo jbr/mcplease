@@ -30,7 +30,7 @@ jobs:
       with:
         tool: cargo-expand
     - name: Tests
-      run: cargo test
+      run: cargo test --all
       env:
         RUST_LOG: trace
 
