@@ -1,0 +1,26 @@
+[package]
+name = "mcplease-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool for creating MCP servers with mcplease"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jbr/mcplease"
+keywords = ["mcp", "cli"]
+categories = ["development-tools", "command-line-utilities"]
+
+[[bin]]
+name = "mcplease"
+path = "src/main.rs"
+
+[dependencies]
+mcplease = { path = ".." }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+syn = { version = "2.0", features = ["extra-traits", "full"] }
+quote = "1.0"
+prettyplease = "0.2"
+heck = "0.5"
+proc-macro2 = "1.0"
+
+[dev-dependencies]
+tempfile = "3.0"
