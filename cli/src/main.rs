@@ -174,7 +174,7 @@ fn find_tools_macro(file: &syn::File) -> Option<&syn::ItemMacro> {
     })
 }
 
-fn format_tools_file(project_path: &PathBuf) -> Result<()> {
+fn format_tools_file(project_path: &Path) -> Result<()> {
     use std::process::Command;
 
     let output = Command::new("cargo")
@@ -332,7 +332,7 @@ pub struct CreateOptions<'a> {
     pub instructions: Option<&'a str>,
 }
 
-pub fn create_project(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+pub fn create_project(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     // Create directory structure
     fs::create_dir_all(output_dir)?;
     fs::create_dir_all(output_dir.join("src"))?;
@@ -352,7 +352,7 @@ pub fn create_project(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> 
     Ok(())
 }
 
-fn generate_cargo_toml(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_cargo_toml(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let description = opts
         .description
         .unwrap_or("An MCP server built with mcplease");
@@ -385,7 +385,7 @@ serde_json = "1.0"
     Ok(())
 }
 
-fn generate_main_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_main_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let state_ident = format_ident!("{}", opts.state);
     let instructions = opts
         .instructions
@@ -413,7 +413,7 @@ fn generate_main_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn generate_state_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_state_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let state_ident = format_ident!("{}", opts.state);
 
     let file: File = parse_quote! {
@@ -446,7 +446,7 @@ fn generate_state_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn generate_tools_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
+fn generate_tools_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let state_ident = format_ident!("{}", opts.state);
 
     // Only generate the use statement for the state - the tools! macro handles mod declarations
@@ -495,7 +495,7 @@ fn generate_tools_rs(opts: &CreateOptions, output_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &PathBuf) -> Result<()> {
+fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &Path) -> Result<()> {
     let tool_ident = format_ident!("{}", tool_name.to_pascal_case());
     let state_ident = format_ident!("{}", state_name);
     let snake_name = tool_name.to_snake_case();
