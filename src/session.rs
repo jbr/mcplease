@@ -1,13 +1,16 @@
 use anyhow::{Result, anyhow};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
-use std::fs::{self, OpenOptions};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::SystemTime;
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    fs::{self, OpenOptions},
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::SystemTime,
+};
 
 /// Metadata tracked by the session store for each session
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,18 +249,18 @@ where
 
     /// Load sessions from disk
     fn load(&mut self) -> Result<()> {
-        if let Some(storage_path) = &self.storage_path {
-            if storage_path.exists() {
-                log::trace!("reloading {}...", storage_path.display());
+        if let Some(storage_path) = &self.storage_path
+            && storage_path.exists()
+        {
+            log::trace!("reloading {}...", storage_path.display());
 
-                let contents = std::fs::read_to_string(storage_path)?;
-                if !contents.trim().is_empty() {
-                    if let Ok(sessions) = serde_json::from_str(&contents) {
-                        log::debug!("reloaded {}", storage_path.display());
+            let contents = std::fs::read_to_string(storage_path)?;
+            if !contents.trim().is_empty()
+                && let Ok(sessions) = serde_json::from_str(&contents)
+            {
+                log::debug!("reloaded {}", storage_path.display());
 
-                        self.sessions = sessions;
-                    }
-                }
+                self.sessions = sessions;
             }
         }
         Ok(())

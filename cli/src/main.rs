@@ -3,12 +3,15 @@ use clap::Parser;
 use heck::{ToPascalCase, ToSnakeCase};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use std::path::PathBuf;
-use std::{fs, path::Path};
-use syn::parse::ParseStream;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use syn::{
-    File, Ident, Item, ItemImpl, ItemMacro, ItemStruct, LitStr, Token, parenthesized, parse::Parse,
-    parse_quote, parse2, punctuated::Punctuated,
+    File, Ident, Item, ItemImpl, ItemMacro, ItemStruct, LitStr, Token, parenthesized,
+    parse::{Parse, ParseStream},
+    parse_quote, parse2,
+    punctuated::Punctuated,
 };
 
 #[cfg(test)]
@@ -280,6 +283,7 @@ fn regenerate_tools_file(original: &File, args: &ToolsMacroArgs) -> Result<File>
     for item in &original.items {
         if !matches!(item, syn::Item::Macro(_mac) if find_tools_macro(&syn::File {
             shebang: None,
+            frontmatter: None,
             attrs: vec![],
             items: vec![item.clone()],
         }).is_some())
@@ -323,6 +327,7 @@ fn regenerate_tools_file(original: &File, args: &ToolsMacroArgs) -> Result<File>
 
     Ok(File {
         shebang: original.shebang.clone(),
+        frontmatter: original.frontmatter.clone(),
         attrs: original.attrs.clone(),
         items: new_items,
     })
@@ -399,14 +404,15 @@ fn generate_main_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
         mod tools;
 
         use anyhow::Result;
-        use mcplease::server_info;
+        use mcplease::{server_info, ServerConfig};
         use state::#state_ident;
 
         const INSTRUCTIONS: &str = #instructions;
 
         fn main() -> Result<()> {
             let mut state = #state_ident::new()?;
-            mcplease::run::<tools::Tools, _>(&mut state, server_info!(), Some(INSTRUCTIONS))
+            let config = ServerConfig::new(server_info!()).with_instructions(INSTRUCTIONS);
+            mcplease::run::<tools::Tools, _>(&mut state, config)
         }
     };
 
@@ -457,7 +463,8 @@ fn generate_tools_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
         use crate::state::#state_ident;
     }];
 
-    // Create the macro call as a raw item since syn doesn't have a clean way to represent macro calls
+    // Create the macro call as a raw item since syn doesn't have a clean way to represent macro
+    // calls
     let tools_macro_string = format!(
         "mcplease::tools!(\n    {},\n{}\n);",
         opts.state,
@@ -477,6 +484,7 @@ fn generate_tools_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
 
     let file = File {
         shebang: None,
+        frontmatter: None,
         attrs: vec![],
         items,
     };
@@ -512,7 +520,7 @@ fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &Path) -> R
     };
 
     let examples_impl: ItemImpl = parse_quote! {
-        impl WithExamples for #tool_ident {
+        impl ToolMeta for #tool_ident {
             fn examples() -> Vec<Example<Self>> {
                 vec![
                     Example {
@@ -528,7 +536,16 @@ fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &Path) -> R
 
     let tool_impl: ItemImpl = parse_quote! {
         impl Tool<#state_ident> for #tool_ident {
-            fn execute(self, _state: &mut #state_ident) -> Result<String> {
+            /// Plain text. Return a type implementing `ToolOutput` (see
+            /// `mcplease::structured_output!`) to also send a structured
+            /// result that a client can display without parsing this string.
+            type Output = String;
+
+            fn execute(
+                self,
+                _state: &mut #state_ident,
+                _context: &RequestContext,
+            ) -> Result<Self::Output> {
                 // TODO: Implement tool logic
                 Ok(format!("{} executed with param: {}", #snake_name, self.example_param))
             }
@@ -537,18 +554,19 @@ fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &Path) -> R
 
     let file = File {
         shebang: None,
+        frontmatter: None,
         attrs: vec![],
         items: vec![
             // Use statements
             parse_quote! { use crate::state::#state_ident; },
             parse_quote! { use anyhow::Result; },
-            parse_quote! { use mcplease::traits::{Tool, WithExamples}; },
-            parse_quote! { use mcplease::types::Example; },
+            parse_quote! { use mcplease::traits::{Tool, ToolMeta}; },
+            parse_quote! { use mcplease::types::{Example, RequestContext}; },
             parse_quote! { use serde::{Deserialize, Serialize}; },
             // Actual items
-            tool_struct.into(),
-            examples_impl.into(),
-            tool_impl.into(),
+            Item::Struct(tool_struct),
+            Item::Impl(examples_impl),
+            Item::Impl(tool_impl),
         ],
     };
 

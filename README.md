@@ -64,7 +64,7 @@ cd my-mcp-server
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 fieldwork = "0.4.6"
-mcplease = "0.2.0"
+mcplease = "0.3.0"
 schemars = "1.0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -124,8 +124,8 @@ Create `src/tools/` directory and add tool implementations. Each tool should be 
 use crate::state::MyToolsState;
 use anyhow::Result;
 use mcplease::{
-    traits::{Tool, WithExamples},
-    types::Example,
+    traits::{Tool, ToolMeta},
+    types::{Example, RequestContext},
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,7 +142,7 @@ pub struct Hello {
     pub enthusiastic: Option<bool>,
 }
 
-impl WithExamples for Hello {
+impl ToolMeta for Hello {
     fn examples() -> Vec<Example<Self>> {
         vec![
             Example {
@@ -164,7 +164,9 @@ impl WithExamples for Hello {
 }
 
 impl Tool<MyToolsState> for Hello {
-    fn execute(self, _state: &mut MyToolsState) -> Result<String> {
+    type Output = String;
+
+    fn execute(self, _state: &mut MyToolsState, _context: &RequestContext) -> Result<String> {
         let greeting = if self.enthusiastic.unwrap_or(false) {
             format!("Hello, {}! 🎉", self.name)
         } else {
@@ -180,8 +182,8 @@ impl Tool<MyToolsState> for Hello {
 use crate::state::MyToolsState;
 use anyhow::Result;
 use mcplease::{
-    traits::{Tool, WithExamples},
-    types::Example,
+    traits::{Tool, ToolMeta},
+    types::{Example, RequestContext},
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -194,7 +196,7 @@ pub struct SetWorkingDirectory {
     pub path: String,
 }
 
-impl WithExamples for SetWorkingDirectory {
+impl ToolMeta for SetWorkingDirectory {
     fn examples() -> Vec<Example<Self>> {
         vec![
             Example {
@@ -208,7 +210,7 @@ impl WithExamples for SetWorkingDirectory {
 }
 
 impl Tool<MyToolsState> for SetWorkingDirectory {
-    fn execute(self, state: &mut MyToolsState) -> Result<String> {
+    fn execute(self, state: &mut MyToolsState, _context: &RequestContext) -> Result<String> {
         let path = PathBuf::from(&*shellexpand::tilde(&self.path));
         
         if !path.exists() {
@@ -240,14 +242,15 @@ mod state;
 mod tools;
 
 use anyhow::Result;
-use mcplease::server_info;
+use mcplease::{ServerConfig, server_info};
 use state::MyToolsState;
 
 const INSTRUCTIONS: &str = "This is my custom MCP server. Use set_working_directory to establish context.";
 
 fn main() -> Result<()> {
     let mut state = MyToolsState::new()?;
-    mcplease::run::<tools::Tools, _>(&mut state, server_info!(), Some(INSTRUCTIONS))
+    let config = ServerConfig::new(server_info!()).with_instructions(INSTRUCTIONS);
+    mcplease::run::<tools::Tools, _>(&mut state, config)
 }
 ```
 
@@ -268,9 +271,10 @@ cargo run set-working-directory --path "/tmp"
 
 1. **`tools!` macro**: Generates the enum that implements MCP tool dispatch
 2. **`Tool` trait**: Defines how individual tools execute
-3. **`WithExamples` trait**: Provides example usage for documentation
-4. **`SessionStore`**: Handles persistent state with cross-process sync
-5. **JSON Schema generation**: Automatic from Rust structs via `schemars`
+3. **`ToolMeta` trait**: Examples, behavior hints, title, and icons for a tool
+4. **`ToolOutput` trait**: What a tool returns — plain text or a structured value
+5. **`SessionStore`**: Handles persistent state with cross-process sync
+6. **JSON Schema generation**: Automatic from Rust structs via `schemars`
 
 ### Tool Definition Pattern
 
@@ -290,7 +294,7 @@ pub struct MyTool {
     pub optional_param: Option<bool>,
 }
 
-impl WithExamples for MyTool { /* ... */ }
+impl ToolMeta for MyTool { /* ... */ }
 impl Tool<StateType> for MyTool { /* ... */ }
 ```
 
@@ -325,11 +329,15 @@ store.set("session_id", new_data)?;
 
 ### Error Handling
 
-Tools should return `anyhow::Result<String>` for consistent error propagation:
+Tools return `anyhow::Result<Self::Output>`. A returned `Err` becomes a tool
+result with `isError: true` rather than a JSON-RPC protocol error, so the model
+sees the failure and can correct itself:
 
 ```rust
 impl Tool<State> for MyTool {
-    fn execute(self, state: &mut State) -> Result<String> {
+    type Output = String;
+
+    fn execute(self, state: &mut State, _context: &RequestContext) -> Result<String> {
         // Use ? for error propagation
         let data = std::fs::read_to_string(&self.path)
             .with_context(|| format!("Failed to read {}", self.path))?;
@@ -345,7 +353,7 @@ impl Tool<State> for MyTool {
 Provide meaningful examples to help users understand tool usage:
 
 ```rust
-impl WithExamples for MyTool {
+impl ToolMeta for MyTool {
     fn examples() -> Vec<Example<Self>> {
         vec![
             Example {
@@ -365,6 +373,122 @@ impl WithExamples for MyTool {
         ]
     }
 }
+```
+
+### Structured Output
+
+A tool returning `String` sends plain text to the model and nothing else. A tool
+can instead return a structured type, which is sent *both* as text for the model
+and as a machine-readable value the calling client can display without parsing
+the text. The type's JSON Schema is advertised as the tool's `outputSchema`, so
+a client knows the shape before ever calling it.
+
+```rust
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Weather {
+    pub temperature: f64,
+    pub conditions: String,
+}
+
+// Implements ToolOutput using the spec's recommended shape.
+mcplease::structured_output!(Weather);
+
+impl Tool<State> for GetWeather {
+    type Output = Weather;
+
+    fn execute(self, state: &mut State, _context: &RequestContext) -> Result<Weather> {
+        Ok(Weather { temperature: 22.5, conditions: "Partly cloudy".into() })
+    }
+}
+```
+
+By default the same value is sent both ways — the text half is its serialized
+JSON — which is what keeps clients that ignore structured content working. For
+large results, implement `ToolOutput` by hand and override `to_content` to send
+the model a summary while the client still receives the full record.
+
+### Rich Content
+
+Returning `Vec<ContentBlock>` sends images, audio, embedded resources, or
+several blocks at once. Blocks carry optional annotations, which are how you
+mark one block for the user and another for the model:
+
+```rust
+impl Tool<State> for Render {
+    type Output = Vec<ContentBlock>;
+
+    fn execute(self, state: &mut State, _context: &RequestContext) -> Result<Self::Output> {
+        Ok(vec![
+            ContentBlock::text("Rendered 3 charts."),
+            ContentBlock::Image {
+                data: base64_png,
+                mime_type: "image/png".into(),
+                annotations: Some(Annotations {
+                    audience: Some(vec!["user".into()]),
+                    ..Default::default()
+                }),
+                meta: None,
+            },
+        ])
+    }
+}
+```
+
+### Tool Annotations
+
+Behavior hints tell a client what a tool does before it runs one, which is what
+lets it decide what to auto-approve. The protocol's defaults are pessimistic —
+an undeclared tool is assumed to be a destructive, open-world mutation — so
+declaring them is worthwhile:
+
+```rust
+impl ToolMeta for ListFiles {
+    fn annotations() -> Option<ToolAnnotations> {
+        Some(ToolAnnotations {
+            read_only_hint: Some(true),
+            open_world_hint: Some(false),
+            ..Default::default()
+        })
+    }
+
+    fn title() -> Option<&'static str> {
+        Some("List Files")
+    }
+}
+```
+
+### Knowing the Caller
+
+`RequestContext` describes the client making *this* call — its protocol version,
+self-reported identity, and the capabilities it supports. Capabilities are
+declared per-request and must not be carried over from earlier ones, so this is
+rebuilt for each call. On the command-line path it is empty, since there is no
+MCP client.
+
+```rust
+fn execute(self, state: &mut State, context: &RequestContext) -> Result<String> {
+    if let Some(client) = &context.client_info {
+        log::info!("called by {} {}", client.name, client.version);
+    }
+    // ...
+}
+```
+
+### Server Configuration
+
+`ServerConfig` carries everything the serve loop needs beyond the tools:
+
+```rust
+let config = ServerConfig::new(server_info!())
+    .with_instructions(INSTRUCTIONS)
+    // How long a client may cache the tool list. The list is fixed at compile
+    // time, so the default is generous (one hour).
+    .with_tools_ttl_ms(60 * 60 * 1000)
+    // Opt in only if the tool list is identical for every user.
+    .with_tools_cache_scope(CacheScope::Public);
+
+mcplease::run::<tools::Tools, _>(&mut state, config)
 ```
 
 ### Optional Parameters

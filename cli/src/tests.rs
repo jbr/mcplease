@@ -31,24 +31,23 @@ fn test_create_project_compiles() {
     assert!(project_path.join("src/tools/greet.rs").exists());
     assert!(project_path.join("src/tools/status.rs").exists());
 
-    // Add a patch section to use the local mcplease
+    // Point the generated project at this working copy rather than at the
+    // published crate. Required while the current version is unreleased, and
+    // it is what makes this test check the generated code against the library
+    // it was generated from.
     let cargo_toml_path = project_path.join("Cargo.toml");
     let mut cargo_content =
         std::fs::read_to_string(&cargo_toml_path).expect("Failed to read Cargo.toml");
 
-    // Find the mcplease source directory using the manifest dir
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mcplease_path = manifest_dir
         .parent()
         .expect("Failed to get parent directory");
 
-    cargo_content = cargo_content.replace(
-        "# [patch.crates-io]\n# mcplease = { path = \"../mcplease\" }",
-        &format!(
-            "[patch.crates-io]\nmcplease = {{ path = \"{}\" }}",
-            mcplease_path.display()
-        ),
-    );
+    cargo_content.push_str(&format!(
+        "\n[patch.crates-io]\nmcplease = {{ path = \"{}\" }}\n",
+        mcplease_path.display()
+    ));
 
     std::fs::write(&cargo_toml_path, cargo_content).expect("Failed to write updated Cargo.toml");
 
@@ -90,7 +89,13 @@ fn test_cargo_toml_generation() {
 
     assert!(content.contains("name = \"my-test-server\""));
     assert!(content.contains("description = \"Custom description\""));
-    assert!(content.contains("mcplease = \"0.2\""));
+    // Tracks this crate's own version rather than a literal, so a version
+    // bump does not silently drift from what the generator emits.
+    let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    assert!(content.contains(&format!(
+        "mcplease = \"{}.{}\"",
+        version.major, version.minor
+    )));
 }
 
 #[test]
@@ -107,7 +112,9 @@ fn test_tool_file_generation() {
 
     assert!(content.contains("pub struct HelloWorld"));
     assert!(content.contains("impl Tool<MyState> for HelloWorld"));
-    assert!(content.contains("impl WithExamples for HelloWorld"));
+    assert!(content.contains("impl ToolMeta for HelloWorld"));
+    assert!(content.contains("type Output = String;"));
+    assert!(content.contains("_context: &RequestContext"));
     assert!(content.contains("#[serde(rename = \"hello_world\")]"));
 }
 
