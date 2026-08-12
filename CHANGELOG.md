@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/jbr/mcplease/compare/mcplease-v0.2.3...mcplease-v0.3.0) - 2026-08-12
+
+### Added
+
+- [**breaking**] adopt further affordances from 2026-07-28
+- [**breaking**] rewrite protocol types against the MCP 2026-07-28 schema revision
+
+### Other
+
+- use trusted-publishers
+- run fmt on nightly
+
 ### Changed
 
 - **Breaking:** protocol types rewritten against the MCP `2026-07-28` schema
