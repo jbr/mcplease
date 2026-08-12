@@ -250,17 +250,19 @@ where
     /// Load sessions from disk
     fn load(&mut self) -> Result<()> {
         if let Some(storage_path) = &self.storage_path
-            && storage_path.exists() {
-                log::trace!("reloading {}...", storage_path.display());
+            && storage_path.exists()
+        {
+            log::trace!("reloading {}...", storage_path.display());
 
-                let contents = std::fs::read_to_string(storage_path)?;
-                if !contents.trim().is_empty()
-                    && let Ok(sessions) = serde_json::from_str(&contents) {
-                        log::debug!("reloaded {}", storage_path.display());
+            let contents = std::fs::read_to_string(storage_path)?;
+            if !contents.trim().is_empty()
+                && let Ok(sessions) = serde_json::from_str(&contents)
+            {
+                log::debug!("reloaded {}", storage_path.display());
 
-                        self.sessions = sessions;
-                    }
+                self.sessions = sessions;
             }
+        }
         Ok(())
     }
 
