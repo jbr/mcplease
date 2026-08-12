@@ -1,6 +1,8 @@
 //! The tool-authoring surface: what `Tool`, `ToolOutput`, and `ToolMeta`
 //! produce on the wire.
 
+#![cfg(feature = "server")]
+
 use anyhow::Result;
 use mcplease::{
     structured_output,

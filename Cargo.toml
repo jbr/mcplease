@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "mcplease"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "simple mcp framework"
 license = "MIT OR Apache-2.0"
@@ -15,14 +15,54 @@ keywords = ["mcp"]
 categories = ["development-tools"]
 
 [dependencies]
-anyhow = "1.0.104"
-clap = { version = "4.6.6", features = ["derive"] }
-dirs = "6.0.0"
-env_logger = "0.11.11"
-fieldwork = "0.5.3"
+# Always on: the protocol types need nothing but serde, and `log` is a facade
+# with no transitive dependencies.
 log = "0.4.33"
-notify = "8.2.0"
-schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-shellexpand = "3.1.2"
+
+# `server`
+anyhow = { version = "1.0.104", optional = true }
+fieldwork = { version = "0.5.3", optional = true }
+schemars = { version = "1.2.2", optional = true }
+
+# `cli`
+clap = { version = "4.6.6", features = ["derive"], optional = true }
+env_logger = { version = "0.11.11", optional = true }
+
+# `cli` and `session` (both locate and expand storage paths)
+dirs = { version = "6.0.0", optional = true }
+shellexpand = { version = "3.1.2", optional = true }
+
+# `session`
+notify = { version = "8.2.0", optional = true }
+
+# The features name the two axes a consumer picks along: *what side of the
+# protocol* it implements, and *over what transport*. `types` is unconditional
+# because both sides need all of it — a `JsonRpcRequest` is written by a client
+# and read by a server — and it costs nothing but serde.
+#
+# The default is everything, so a consumer that does not opt out is unaffected
+# by the split.
+[features]
+default = ["cli", "session"]
+
+# Author and dispatch tools, transport-agnostically: the `traits` module, the
+# `tools!` and `server_info!` macros, and `handle_request`, which maps a decoded
+# `JsonRpcRequest` to a `JsonRpcResponse` without performing any I/O. This is
+# the whole surface a non-stdio transport (an HTTP endpoint, say) needs.
+server = ["dep:anyhow", "dep:fieldwork", "dep:schemars"]
+
+# The stdio transport: a blocking `serve` loop over stdin/stdout, the transport
+# every locally-spawned MCP server speaks.
+stdio = ["server"]
+
+# The command-line path: `run`, which invokes a tool directly from argv via clap
+# (so a tool is testable without an MCP client) and otherwise starts `serve`.
+# This is what makes `tools!` derive clap's `Subcommand`.
+cli = ["stdio", "dep:clap", "dep:dirs", "dep:env_logger", "dep:shellexpand"]
+
+# `SessionStore`: per-session state persisted to disk and kept in sync across
+# processes with a file watcher. Orthogonal to both axes — a server on any
+# transport may or may not want it — and the only thing that pulls `notify`.
+session = ["dep:anyhow", "dep:dirs", "dep:notify", "dep:shellexpand"]

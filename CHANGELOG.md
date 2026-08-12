@@ -5,7 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-12
+
+### Added
+
+- feature flags, so a consumer can take part of the crate. `types` is
+  unconditional; `server` is the transport-agnostic tool-authoring and dispatch
+  surface (`traits`, `tools!`, `handle_request`); `stdio` is the stdin/stdout
+  serve loop; `cli` is the clap argv path; `session` is `SessionStore`. The
+  default is `["cli", "session"]`, which is everything, so an existing consumer
+  is unaffected.
+- `handle_request` and `serve` are public. `handle_request` answers a decoded
+  `JsonRpcRequest` with a `JsonRpcResponse` and performs no I/O, which is the
+  whole surface a transport this crate does not implement — an HTTP endpoint,
+  say — needs from it.
+
+### Changed
+
+- `tools!` derives clap's `Subcommand` for the generated `Tools` enum only
+  under the `cli` feature. A tool struct's own `clap::Args` derive is likewise
+  needed only there; `#[cfg_attr(feature = "cli", derive(clap::Args))]` keeps a
+  tool usable in both configurations.
+- `initialize` reads `protocolVersion` directly from the request params rather
+  than by deserializing all of `InitializeRequestParams`. Version negotiation is
+  precisely where the two sides have not yet agreed on the message shape, and a
+  `clientInfo` that failed to parse previously cost the client its requested
+  version and silently returned the fallback.
+
+## [0.3.0] - 2026-08-12
+
 
 ### Changed
 
