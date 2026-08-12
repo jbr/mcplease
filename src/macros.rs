@@ -82,7 +82,7 @@ macro_rules! tools {
         }
 
         impl $crate::traits::AsToolsList for Tools {
-            fn tools_list() -> Vec<$crate::types::ToolSchema> {
+            fn tools_list() -> Vec<$crate::types::Tool> {
                 use $crate::traits::AsToolSchema;
                 vec![$($capitalized::schema(),)+]
             }
@@ -102,9 +102,6 @@ macro_rules! tools {
 #[macro_export]
 macro_rules! server_info {
     () => {
-        $crate::types::Info {
-            name: env!("CARGO_PKG_NAME").into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-        }
+        $crate::types::Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
     };
 }

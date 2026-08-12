@@ -1,4 +1,4 @@
-use crate::types::{Example, ToolSchema};
+use crate::types::{Example, Tool as ToolDefinition};
 use anyhow::Result;
 use schemars::{
     JsonSchema, Schema,
@@ -34,18 +34,18 @@ pub trait Tool<State>: Serialize + DeserializeOwned {
 }
 
 pub trait AsToolSchema {
-    fn schema() -> ToolSchema;
+    fn schema() -> ToolDefinition;
 }
 
 pub trait AsToolsList {
-    fn tools_list() -> Vec<ToolSchema>;
+    fn tools_list() -> Vec<ToolDefinition>;
 }
 
 impl<T> AsToolSchema for T
 where
     T: JsonSchema + WithExamples,
 {
-    fn schema() -> ToolSchema {
+    fn schema() -> ToolDefinition {
         let settings = SchemaSettings::draft2020_12().with(|s| {
             s.meta_schema = None;
             s.inline_subschemas = true;
@@ -71,28 +71,15 @@ where
         schema.remove("$schema");
 
         let examples = Self::examples();
-        if examples.is_empty() {
+        if !examples.is_empty() {
             schema.insert(
                 "examples".to_string(),
                 serde_json::to_value(examples).unwrap(),
             );
         }
 
-        let value: Value = schema.into();
-        let input_schema = match serde_json::from_value(value.clone()) {
-            Ok(input_schema) => input_schema,
-            Err(e) => {
-                let json = serde_json::to_string_pretty(&value).unwrap();
-                log::error!("could not parse input schema:\n{e}\n\n{json}");
-                eprintln!("could not parse input schema:\n{e}\n\n{json}");
-                panic!("{e}");
-            }
-        };
-
-        ToolSchema {
-            name,
-            description: Some(description),
-            input_schema,
-        }
+        let mut tool = ToolDefinition::new(name, schema.into());
+        tool.description = Some(description);
+        tool
     }
 }
