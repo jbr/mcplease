@@ -72,19 +72,50 @@ macro_rules! tools {
         }
 
 
-        impl $crate::traits::Tool<$state> for Tools {
-            fn execute(self, state: &mut $state) -> $crate::anyhow::Result<String> {
+        // `Tools` dispatches to tools rather than being one: each variant has
+        // its own `Output` type, so it implements `Dispatch` rather than
+        // `Tool`, erasing those types into a `CallToolResult`.
+        impl $crate::traits::Dispatch<$state> for Tools {
+            fn call(
+                self,
+                state: &mut $state,
+                context: &$crate::types::RequestContext,
+            ) -> $crate::anyhow::Result<$crate::types::CallToolResult> {
+                use $crate::traits::{Tool as _, ToolOutput as _};
                 match self {
-                    $(Tools::$capitalized(tool) => tool.execute(state),)+
+                    $(Tools::$capitalized(tool) => tool.execute(state, context).map(|output| {
+                        $crate::types::CallToolResult::from_content(
+                            output.to_content(),
+                            output.structured_content(),
+                        )
+                    }),)+
                 }
             }
 
+            fn call_to_text(
+                self,
+                state: &mut $state,
+                context: &$crate::types::RequestContext,
+            ) -> $crate::anyhow::Result<String> {
+                use $crate::traits::{Tool as _, ToolOutput as _};
+                match self {
+                    $(Tools::$capitalized(tool) => {
+                        tool.execute(state, context).map(|output| output.to_text())
+                    })+
+                }
+            }
         }
 
         impl $crate::traits::AsToolsList for Tools {
+            // Macro expansion order is the advertised order, which gives the
+            // deterministic ordering the spec asks for: it lets clients cache
+            // the list and keeps tool definitions stable in the model's
+            // prompt cache. Do not sort or collect these through a HashMap.
             fn tools_list() -> Vec<$crate::types::Tool> {
                 use $crate::traits::AsToolSchema;
-                vec![$($capitalized::schema(),)+]
+                vec![
+                    $(<$capitalized as AsToolSchema<$state>>::schema(),)+
+                ]
             }
         }
 

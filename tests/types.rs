@@ -1,5 +1,5 @@
 use mcplease::types::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn roundtrip<T: serde::Serialize + serde::de::DeserializeOwned>(value: Value) -> Value {
     let typed: T = serde_json::from_value(value).unwrap();
@@ -9,14 +9,12 @@ fn roundtrip<T: serde::Serialize + serde::de::DeserializeOwned>(value: Value) ->
 #[test]
 fn message_discrimination() {
     let request: JsonRpcMessage =
-        serde_json::from_value(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
-            .unwrap();
+        serde_json::from_value(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).unwrap();
     assert!(matches!(request, JsonRpcMessage::Request(_)));
 
-    let notification: JsonRpcMessage = serde_json::from_value(
-        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-    )
-    .unwrap();
+    let notification: JsonRpcMessage =
+        serde_json::from_value(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+            .unwrap();
     assert!(matches!(notification, JsonRpcMessage::Notification(_)));
 
     let response: JsonRpcMessage =
@@ -118,4 +116,96 @@ fn list_tools_result_tolerates_missing_2026_fields() {
     .unwrap();
     assert_eq!(result.tools.len(), 1);
     assert_eq!(result.result_type, None); // spec: absent means "complete"
+}
+
+#[test]
+fn result_type_round_trips_and_preserves_unknown_values() {
+    assert_eq!(
+        serde_json::from_value::<ResultType>(json!("complete")).unwrap(),
+        ResultType::Complete
+    );
+    assert_eq!(
+        serde_json::from_value::<ResultType>(json!("input_required")).unwrap(),
+        ResultType::InputRequired
+    );
+
+    // A revision after 2026-07-28 may add result types; keep the value rather
+    // than failing to parse the response.
+    let future: ResultType = serde_json::from_value(json!("something_new")).unwrap();
+    assert_eq!(future, ResultType::Other("something_new".into()));
+    assert_eq!(
+        serde_json::to_value(&future).unwrap(),
+        json!("something_new")
+    );
+}
+
+#[test]
+fn tool_call_outcome_discriminates_on_result_type() {
+    // The failure this prevents: an input_required result read as a
+    // successful call that happens to have returned no content.
+    let complete: ToolCallOutcome = serde_json::from_value(json!({
+        "resultType": "complete",
+        "content": [{"type": "text", "text": "hi"}]
+    }))
+    .unwrap();
+    assert!(matches!(complete, ToolCallOutcome::Complete(_)));
+
+    // requestState with no inputRequests: the load-shedding case, which needs
+    // no declared client capability, so any client can receive one.
+    let shed: ToolCallOutcome = serde_json::from_value(json!({
+        "resultType": "input_required",
+        "requestState": "opaque-blob"
+    }))
+    .unwrap();
+    let ToolCallOutcome::InputRequired(shed) = shed else {
+        panic!("expected input_required");
+    };
+    assert_eq!(shed.request_state.as_deref(), Some("opaque-blob"));
+    assert!(shed.input_requests.is_none());
+
+    let elicit: ToolCallOutcome = serde_json::from_value(json!({
+        "resultType": "input_required",
+        "requestState": "state",
+        "inputRequests": {
+            "confirm": {
+                "method": "elicitation/create",
+                "params": {"message": "sure?", "requestedSchema": {"type": "object", "properties": {}}}
+            }
+        }
+    }))
+    .unwrap();
+    let ToolCallOutcome::InputRequired(elicit) = elicit else {
+        panic!("expected input_required");
+    };
+    assert!(elicit.input_requests.unwrap().contains_key("confirm"));
+
+    // A server on an earlier revision omits resultType; the spec directs
+    // clients to treat that as complete.
+    let legacy: ToolCallOutcome = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": "hi"}]
+    }))
+    .unwrap();
+    assert!(matches!(legacy, ToolCallOutcome::Complete(_)));
+}
+
+#[test]
+fn request_context_reads_per_request_meta() {
+    let context = RequestContext::from_params(Some(&json!({
+        "name": "some_tool",
+        "arguments": {},
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "harness", "version": "9"},
+            "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}
+        }
+    })));
+
+    assert_eq!(context.protocol_version.as_deref(), Some("2026-07-28"));
+    assert_eq!(context.client_info.as_ref().unwrap().name, "harness");
+    assert!(context.supports_elicitation());
+
+    // A request from an earlier revision carries none of this.
+    let legacy = RequestContext::from_params(Some(&json!({"name": "t", "arguments": {}})));
+    assert_eq!(legacy.protocol_version, None);
+    assert!(!legacy.supports_elicitation());
 }

@@ -404,7 +404,7 @@ pub struct DiscoverResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_scope: Option<CacheScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
+    pub result_type: Option<ResultType>,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Map<String, Value>>,
 }
@@ -416,6 +416,47 @@ pub struct DiscoverResult {
 pub enum CacheScope {
     Public,
     Private,
+}
+
+/// Discriminates a result as final or interim.
+///
+/// `2026-07-28` requires this field on every result. The spec directs clients
+/// to treat an absent value — from a server on an earlier revision — as
+/// [`Complete`](ResultType::Complete). Unrecognized values from a future
+/// revision are preserved in [`Other`](ResultType::Other) rather than failing
+/// to parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultType {
+    /// An ordinary, final result.
+    #[default]
+    Complete,
+    /// An interim result: the server needs more input before it can finish.
+    /// See [`InputRequiredResult`].
+    InputRequired,
+    #[serde(untagged)]
+    Other(String),
+}
+
+/// Well-known `_meta` keys reserved by the specification.
+///
+/// Any prefix whose second label is `modelcontextprotocol` or `mcp` is
+/// reserved for MCP use, so these must not be invented locally.
+pub mod meta_keys {
+    /// Required on every request (`2026-07-28`).
+    pub const PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+    /// Clients SHOULD send this on every request.
+    pub const CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+    /// Required on every request. Declared per-request; servers MUST NOT infer
+    /// it from prior requests.
+    pub const CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+    /// Servers SHOULD include this in every result.
+    pub const SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+    /// Per-request log level. Deprecated in `2026-07-28` along with Logging.
+    pub const LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
+    /// Correlates a notification with the `subscriptions/listen` stream it
+    /// arrived on.
+    pub const SUBSCRIPTION_ID: &str = "io.modelcontextprotocol/subscriptionId";
 }
 
 // --- tools ---
@@ -487,7 +528,7 @@ pub struct ListToolsResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_scope: Option<CacheScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
+    pub result_type: Option<ResultType>,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Map<String, Value>>,
 }
@@ -516,7 +557,7 @@ pub struct CallToolResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
+    pub result_type: Option<ResultType>,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Map<String, Value>>,
 }
@@ -525,7 +566,18 @@ impl CallToolResult {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: vec![ContentBlock::text(text)],
-            result_type: Some("complete".into()),
+            result_type: Some(ResultType::Complete),
+            ..Self::default()
+        }
+    }
+
+    /// A result carrying both the model-facing content and the program-facing
+    /// structured value produced by a [`ToolOutput`](crate::traits::ToolOutput).
+    pub fn from_content(content: Vec<ContentBlock>, structured_content: Option<Value>) -> Self {
+        Self {
+            content,
+            structured_content,
+            result_type: Some(ResultType::Complete),
             ..Self::default()
         }
     }
@@ -535,6 +587,130 @@ impl CallToolResult {
             is_error: Some(true),
             ..Self::text(text)
         }
+    }
+}
+
+/// An interim `tools/call`, `prompts/get`, or `resources/read` result: the server needs more input
+/// before it can finish, and the client is expected to supply it and re-issue the original request
+/// as a *new* request.
+///
+/// This crate's serve loop never produces one but a client must be able to recognize one. At least
+/// one of `input_requests` or `request_state` is always present; a `request_state`-only result is
+/// the spec's load-shedding case and requires no declared client capability, so *any* client can
+/// receive one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputRequiredResult {
+    /// Server-initiated requests the client must fulfill, keyed by
+    /// server-assigned identifiers. Values are `elicitation/create`,
+    /// `sampling/createMessage`, or `roots/list` requests; the latter two are
+    /// deprecated in `2026-07-28`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_requests: Option<Map<String, Value>>,
+    /// Opaque server state to echo back verbatim on the retry. Clients MUST
+    /// NOT inspect, parse, or modify it, and MUST NOT invent one when the
+    /// server did not send one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<ResultType>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// The two shapes a successful `tools/call` response can take.
+///
+/// Discriminated on `resultType`, treating absent as
+/// [`Complete`](ResultType::Complete) per the spec's rule for servers on
+/// earlier revisions. Without this discrimination a client would deserialize an
+/// [`InputRequiredResult`] as a `CallToolResult` with empty `content` and
+/// report a successful empty tool call.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ToolCallOutcome {
+    Complete(CallToolResult),
+    InputRequired(InputRequiredResult),
+}
+
+impl<'de> Deserialize<'de> for ToolCallOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let value = Value::deserialize(deserializer)?;
+        let result_type = value.get("resultType").and_then(Value::as_str);
+        if result_type == Some("input_required") {
+            serde_json::from_value(value).map(Self::InputRequired)
+        } else {
+            serde_json::from_value(value).map(Self::Complete)
+        }
+        .map_err(D::Error::custom)
+    }
+}
+
+// --- request context ---
+
+/// What a request tells a tool about its caller.
+///
+/// `2026-07-28` removed the handshake, so protocol version and client
+/// capabilities arrive in every request's `_meta` instead of once at
+/// initialization. Capabilities are per-request by design: the spec forbids
+/// servers from inferring them from prior requests, so this is rebuilt for
+/// each call rather than cached.
+///
+/// Requests from earlier revisions carry none of this; every field is
+/// therefore optional or defaulted.
+#[derive(Debug, Clone, Default)]
+pub struct RequestContext {
+    /// The protocol version the caller declared for this request.
+    pub protocol_version: Option<String>,
+    /// The caller's self-reported identity. Not verified by the protocol —
+    /// for display, logging, and debugging only. Servers SHOULD NOT change
+    /// behavior based on it, and MUST NOT use it for security decisions.
+    pub client_info: Option<Implementation>,
+    /// What the caller supports *for this request*. Empty means no optional
+    /// capabilities.
+    pub client_capabilities: ClientCapabilities,
+}
+
+impl RequestContext {
+    /// Build a context from a request's `_meta` object.
+    pub fn from_meta(meta: Option<&Map<String, Value>>) -> Self {
+        let Some(meta) = meta else {
+            return Self::default();
+        };
+
+        Self {
+            protocol_version: meta
+                .get(meta_keys::PROTOCOL_VERSION)
+                .and_then(Value::as_str)
+                .map(String::from),
+            client_info: meta
+                .get(meta_keys::CLIENT_INFO)
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+            client_capabilities: meta
+                .get(meta_keys::CLIENT_CAPABILITIES)
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Pull the `_meta` out of a request's `params` and build a context.
+    pub fn from_params(params: Option<&Value>) -> Self {
+        Self::from_meta(
+            params
+                .and_then(|params| params.get("_meta"))
+                .and_then(Value::as_object),
+        )
+    }
+
+    /// Whether the caller declared support for elicitation on this request.
+    /// A server MUST NOT send an elicitation `inputRequest` when this is false.
+    pub fn supports_elicitation(&self) -> bool {
+        self.client_capabilities.elicitation.is_some()
     }
 }
 
