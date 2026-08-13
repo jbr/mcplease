@@ -16,6 +16,9 @@ categories = ["development-tools"]
 
 [package.metadata.docs.rs]
 features = ["cli", "client", "session", "stdio", "server"]
+# Turns on `feature(doc_cfg)` in lib.rs, which labels every feature-gated item
+# with the feature that enables it.
+rustdoc-args = ["--cfg", "docsrs"]
 
 
 [dependencies]

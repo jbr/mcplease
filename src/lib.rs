@@ -1,3 +1,8 @@
+// Label every feature-gated item in the rendered docs with the feature that
+// enables it. docs.rs builds with `--cfg docsrs` (see `[package.metadata.docs.rs]`);
+// an ordinary build sees none of this.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 //! A simple framework for writing Model Context Protocol servers.
 //!
 //! The [`types`] module is unconditional — both sides of the protocol need all
