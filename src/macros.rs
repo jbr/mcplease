@@ -1,15 +1,43 @@
+/// The `Tools` enum [`tools!`] generates.
+///
+/// Split out so the clap derive — which is what makes a tool invocable from a
+/// shell, and the only part of the generated enum that is command-line specific
+/// — is present only under the `cli` feature. A server on another transport
+/// gets the same enum without the dependency.
+#[cfg(feature = "cli")]
+#[doc(hidden)]
 #[macro_export]
-macro_rules! tools {
-    ($state:tt, $(($capitalized:tt, $lowercase:tt, $string:literal)),+) => {
-        $(mod $lowercase;)+
-        $(pub use $lowercase::$capitalized;)+
-
+macro_rules! __tools_enum {
+    ($($capitalized:tt),+) => {
         #[derive($crate::clap::Subcommand)]
         pub enum Tools {
             $(
                 $capitalized(#[clap(flatten)] $capitalized),
             )+
         }
+    };
+}
+
+#[cfg(not(feature = "cli"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tools_enum {
+    ($($capitalized:tt),+) => {
+        pub enum Tools {
+            $(
+                $capitalized($capitalized),
+            )+
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! tools {
+    ($state:tt, $(($capitalized:tt, $lowercase:tt, $string:literal)),+) => {
+        $(mod $lowercase;)+
+        $(pub use $lowercase::$capitalized;)+
+
+        $crate::__tools_enum!($($capitalized),+);
 
         impl std::fmt::Debug for Tools {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

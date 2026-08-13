@@ -5,7 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-12
+
+### Added
+
+- feature flags, so a consumer can take part of the crate. `types` is
+  unconditional; `server` is the transport-agnostic tool-authoring and dispatch
+  surface (`traits`, `tools!`, `handle_request`); `stdio` is the stdin/stdout
+  serve loop; `cli` is the clap argv path; `client` is the client half of the
+  protocol; `session` is `SessionStore`. The default is `["cli", "client",
+  "session"]`, which is everything, so an existing consumer is unaffected.
+- `handle_request` and `serve` are public. `handle_request` answers a decoded
+  `JsonRpcRequest` with a `JsonRpcResponse` and performs no I/O, which is the
+  whole surface a transport this crate does not implement — an HTTP endpoint,
+  say — needs from it.
+- the `client` module, behind the `client` feature: the client half of the
+  protocol, split the same way as the server half and performing no I/O either,
+  so a transport is responsible for framing alone. `ClientProtocol` allocates
+  request ids, builds requests, and classifies each arriving message as a
+  `Reaction` — a result to correlate by id, a reply to send (`ping` answered,
+  everything else declined as method-not-found), or nothing. `Negotiation` is
+  the `server/discover` probe with its documented fallback to the `initialize`
+  handshake, as a state machine: `Step::Send` a request, feed the result back,
+  `Step::Done` with what was negotiated. There is no transport trait and no
+  sync/async split, because what differs between transports is the read loop
+  itself, which a transport writes. The feature pulls no dependency the crate
+  does not already have unconditionally.
+- `RequestContext` can now be produced as well as parsed: `ClientProtocol`
+  stamps the `_meta` that `2026-07-28` requires on every request — protocol
+  version, client info, capabilities — which is what a server rebuilds with
+  `RequestContext::from_params`. Previously only the reading half existed, so
+  neither side's handling of the reserved `_meta` keys was checkable; a test
+  now drives a client-stamped request through `handle_request` into a tool that
+  reads the caller back out.
+
+### Changed
+
+- `tools!` derives clap's `Subcommand` for the generated `Tools` enum only
+  under the `cli` feature. A tool struct's own `clap::Args` derive is likewise
+  needed only there; `#[cfg_attr(feature = "cli", derive(clap::Args))]` keeps a
+  tool usable in both configurations.
+- `initialize` reads `protocolVersion` directly from the request params rather
+  than by deserializing all of `InitializeRequestParams`. Version negotiation is
+  precisely where the two sides have not yet agreed on the message shape, and a
+  `clientInfo` that failed to parse previously cost the client its requested
+  version and silently returned the fallback.
+
+## [0.3.0] - 2026-08-12
+
 
 ### Changed
 
