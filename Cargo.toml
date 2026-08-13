@@ -14,6 +14,10 @@ exclude = ["spec"]
 keywords = ["mcp"]
 categories = ["development-tools"]
 
+[package.metadata.docs.rs]
+features = ["cli", "client", "session", "stdio", "server"]
+
+
 [dependencies]
 # Always on: the protocol types need nothing but serde, and `log` is a facade
 # with no transitive dependencies.
@@ -45,13 +49,20 @@ notify = { version = "8.2.0", optional = true }
 # The default is everything, so a consumer that does not opt out is unaffected
 # by the split.
 [features]
-default = ["cli", "session"]
+default = ["cli", "client", "session"]
 
 # Author and dispatch tools, transport-agnostically: the `traits` module, the
 # `tools!` and `server_info!` macros, and `handle_request`, which maps a decoded
 # `JsonRpcRequest` to a `JsonRpcResponse` without performing any I/O. This is
 # the whole surface a non-stdio transport (an HTTP endpoint, say) needs.
 server = ["dep:anyhow", "dep:fieldwork", "dep:schemars"]
+
+# The client side of the protocol, transport-agnostically: request
+# construction (including the per-request `_meta` that `2026-07-28` requires),
+# the `server/discover` → `initialize` negotiation, and the disposition of each
+# message that arrives. Like `server`, it performs no I/O — and it needs no
+# dependency beyond the unconditional three, so it is free to enable.
+client = []
 
 # The stdio transport: a blocking `serve` loop over stdin/stdout, the transport
 # every locally-spawned MCP server speaks.

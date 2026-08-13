@@ -10,6 +10,12 @@
 //! [`tools!`] macro, and [`handle_request`], which answers a decoded request
 //! without doing any I/O.
 //!
+//! A *client* wants `default-features = false, features = ["client"]`: the
+//! [`client`] module, which is the same split from the other side — it builds
+//! requests and classifies the messages that arrive, and leaves framing,
+//! connections, and authorization to the transport. It pulls no dependencies
+//! this crate does not already have.
+//!
 //! The dependencies re-exported at the root are there for the macros to name
 //! and for a downstream tool to use without duplicating the version
 //! requirement. Each is present only under the features that pull it.
@@ -20,6 +26,8 @@ mod macros;
 
 #[cfg(feature = "cli")]
 mod cli;
+#[cfg(feature = "client")]
+pub mod client;
 #[cfg(feature = "server")]
 mod server;
 #[cfg(feature = "stdio")]
