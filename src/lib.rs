@@ -5,8 +5,11 @@
 
 //! A simple framework for writing Model Context Protocol servers.
 //!
-//! The [`types`] module is unconditional — both sides of the protocol need all
-//! of it, and it costs nothing but serde. Everything else sits behind a feature
+//! The [`types`] and [`headers`] modules are unconditional — both sides of the
+//! protocol need all of them, and they cost nothing but serde. `headers` is
+//! shared rather than split because a client deriving what to send and a server
+//! checking what arrived are the *same* derivation; splitting them is how they
+//! drift. Everything else sits behind a feature
 //! naming either a *side* of the protocol or a *transport*; see the `[features]`
 //! table in `Cargo.toml`. The default is everything.
 //!
@@ -38,6 +41,7 @@ mod server;
 #[cfg(feature = "stdio")]
 mod stdio;
 
+pub mod headers;
 #[cfg(feature = "session")]
 pub mod session;
 #[cfg(feature = "server")]
