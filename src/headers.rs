@@ -3,7 +3,10 @@
 //!
 //! `Mcp-Method` mirrors the body's `method` on every request; `Mcp-Name`
 //! mirrors `params.name` or `params.uri` on the three methods that address a
-//! specific tool, prompt, or resource. Both are **required for compliance**.
+//! specific tool, prompt, or resource. Both are **required for compliance**
+//! with `2026-07-28` and later — earlier protocol revisions do not define
+//! them, so [`validate`] only *requires* them of a request whose
+//! `MCP-Protocol-Version` header declares a revision that does.
 //!
 //! Their whole purpose is redundancy: an intermediary — a load balancer, a
 //! router, a rate limiter — can act on the header without parsing the body, so
@@ -49,6 +52,14 @@ use std::borrow::Cow;
 pub const MCP_METHOD: &str = "mcp-method";
 /// The header naming the addressed tool, prompt, or resource.
 pub const MCP_NAME: &str = "mcp-name";
+/// The header carrying the client's declared protocol version, sent on every
+/// HTTP request since `2025-06-18`.
+pub const MCP_PROTOCOL_VERSION: &str = "mcp-protocol-version";
+
+/// The first protocol revision that defines the standard headers (SEP-2243).
+///
+/// Revisions are ISO dates, so `>=` on the strings is `>=` on the revisions.
+const STANDARD_HEADERS_SINCE: &str = "2026-07-28";
 
 /// The marker wrapping a base64-encoded header value. Case-sensitive, and
 /// lowercase exactly as shown.
@@ -92,10 +103,18 @@ pub fn name_for(method: &str, params: Option<&Value>) -> Option<String> {
 /// requires for a validation failure.
 ///
 /// Only requests and notifications are checked; a response carries no `method`
-/// to disagree about. A message whose required header is *absent* fails the
-/// same way one that mismatches does — the specification lists both as
-/// validation failures, and a missing header is exactly the case an
-/// intermediary would have had nothing to route on.
+/// to disagree about.
+///
+/// A message whose required header is *absent* fails the same way one that
+/// mismatches does — the specification lists both as validation failures, and a
+/// missing header is exactly the case an intermediary would have had nothing to
+/// route on. But *required* is a property of the protocol revision: a request
+/// whose `MCP-Protocol-Version` header declares a revision before `2026-07-28`
+/// (or no version at all, which implies a legacy revision) predates SEP-2243
+/// and cannot be expected to send headers its protocol does not define, so
+/// absence passes. A header that is *present* must agree with the body
+/// regardless of revision — a disagreeing mirror is exactly what an
+/// intermediary would mis-route on, whatever era the client speaks.
 pub fn validate<'a>(
     message: &JsonRpcMessage,
     header: impl Fn(&str) -> Option<&'a str>,
@@ -103,9 +122,11 @@ pub fn validate<'a>(
     let Some((method, params)) = method_and_params(message) else {
         return Ok(());
     };
-    check(MCP_METHOD, method, header(MCP_METHOD))?;
+    let required =
+        header(MCP_PROTOCOL_VERSION).is_some_and(|version| version >= STANDARD_HEADERS_SINCE);
+    check(MCP_METHOD, method, header(MCP_METHOD), required)?;
     if let Some(name) = name_for(method, params) {
-        check(MCP_NAME, &name, header(MCP_NAME))?;
+        check(MCP_NAME, &name, header(MCP_NAME), required)?;
     }
     Ok(())
 }
@@ -113,8 +134,16 @@ pub fn validate<'a>(
 /// One header against one body value, decoding the sentinel encoding first —
 /// the specification requires servers to decode before comparing, so a client
 /// that had to encode a name is not rejected for having done so.
-fn check(name: &'static str, expected: &str, actual: Option<&str>) -> Result<(), JsonRpcError> {
+fn check(
+    name: &'static str,
+    expected: &str,
+    actual: Option<&str>,
+    required: bool,
+) -> Result<(), JsonRpcError> {
     let Some(actual) = actual else {
+        if !required {
+            return Ok(());
+        }
         return Err(mismatch(
             format!("Header mismatch: required header {name} is missing"),
             name,

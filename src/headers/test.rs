@@ -165,26 +165,65 @@ fn header_lookup_is_case_insensitive() {
     assert!(validate(&message, headers(&[("Mcp-Method", "tools/list")])).is_ok());
 }
 
-/// The failure that motivated this: a client sending no standard headers at
-/// all. Silent acceptance is what let it go unnoticed against servers built on
-/// this crate.
+/// A client declaring `2026-07-28` or later has no excuse: the standard
+/// headers are part of the protocol it claims to speak.
 #[test]
-fn a_missing_method_header_is_rejected() {
-    let error = validate(&request("tools/list", None), headers(&[])).unwrap_err();
+fn a_missing_method_header_is_rejected_on_a_modern_revision() {
+    let error = validate(
+        &request("tools/list", None),
+        headers(&[(MCP_PROTOCOL_VERSION, "2026-07-28")]),
+    )
+    .unwrap_err();
     assert_eq!(error.code, error_codes::HEADER_MISMATCH);
     assert!(error.message.contains("mcp-method"), "{}", error.message);
     assert!(error.message.contains("missing"), "{}", error.message);
 }
 
 #[test]
-fn a_missing_name_header_is_rejected() {
+fn a_missing_name_header_is_rejected_on_a_modern_revision() {
     let message = request(
         "tools/call",
         Some(serde_json::json!({"name": "get_weather"})),
     );
-    let error = validate(&message, headers(&[("mcp-method", "tools/call")])).unwrap_err();
+    let error = validate(
+        &message,
+        headers(&[
+            (MCP_PROTOCOL_VERSION, "2026-07-28"),
+            ("mcp-method", "tools/call"),
+        ]),
+    )
+    .unwrap_err();
     assert_eq!(error.code, error_codes::HEADER_MISMATCH);
     assert!(error.message.contains("mcp-name"), "{}", error.message);
+}
+
+/// SEP-2243 postdates every revision through `2025-11-25`: a client declaring
+/// one of those — or declaring nothing, which implies a legacy revision —
+/// cannot be expected to send headers its protocol does not define.
+#[test]
+fn absent_headers_pass_on_a_pre_sep2243_revision() {
+    let message = request(
+        "tools/call",
+        Some(serde_json::json!({"name": "get_weather"})),
+    );
+    assert!(validate(&message, headers(&[(MCP_PROTOCOL_VERSION, "2025-11-25")])).is_ok());
+    assert!(validate(&message, headers(&[(MCP_PROTOCOL_VERSION, "2025-03-26")])).is_ok());
+    assert!(validate(&message, headers(&[])).is_ok());
+}
+
+/// The version gates requiredness, not agreement: a mirror header that is
+/// present and wrong is a mis-route waiting to happen in any era.
+#[test]
+fn a_present_header_must_agree_regardless_of_revision() {
+    let error = validate(
+        &request("tools/list", None),
+        headers(&[
+            (MCP_PROTOCOL_VERSION, "2025-11-25"),
+            ("mcp-method", "tools/call"),
+        ]),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, error_codes::HEADER_MISMATCH);
 }
 
 /// The security case the redundancy exists for: an intermediary routing on the
