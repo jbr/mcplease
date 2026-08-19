@@ -59,6 +59,18 @@ fn tools_call_dispatches_through_the_generated_enum() {
     assert!(response["result"].get("isError").is_none());
 }
 
+/// `params.arguments` is optional in the schema: calling a tool that takes no
+/// arguments without the field must work, and absent means the same as `{}`.
+#[test]
+fn tools_call_without_arguments_dispatches_a_zero_argument_tool() {
+    let response = call("tools/call", json!({"name": "whoami"}));
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["content"][0]["text"],
+        "anonymous on unstated, elicitation: false"
+    );
+}
+
 #[test]
 fn a_tool_failure_is_an_is_error_result_not_a_protocol_error() {
     let response = call(

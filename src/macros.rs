@@ -64,12 +64,17 @@ macro_rules! tools {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| de::Error::missing_field("name"))?;
 
-                let arguments = obj.get("arguments")
-                .ok_or_else(|| de::Error::missing_field("arguments"))?;
+                // `params.arguments` is optional in the schema: a tool that
+                // takes no arguments may be called without it, and absent
+                // means the same as `{}`.
+                let arguments = match obj.get("arguments") {
+                    Some(arguments) => arguments.clone(),
+                    None => $crate::serde_json::Value::Object($crate::serde_json::Map::new()),
+                };
 
                 match name {
                     $(
-                        $string => $crate::serde_json::from_value(arguments.clone())
+                        $string => $crate::serde_json::from_value(arguments)
                                        .map_err(de::Error::custom)
                                        .map(Tools::$capitalized),
                     )+
