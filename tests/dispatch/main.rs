@@ -14,11 +14,17 @@ use mcplease::{
 };
 use serde_json::json;
 
+#[derive(Clone)]
 pub struct State {
     pub greeting: String,
 }
 
-mcplease::tools!(State, (Echo, echo, "echo"), (Whoami, whoami, "whoami"));
+mcplease::tools!(
+    cli = false,
+    State,
+    (Echo, echo, "echo"),
+    (Whoami, whoami, "whoami")
+);
 
 fn config() -> ServerConfig {
     ServerConfig::new(Implementation::new("test-server", "1.2.3"))
@@ -30,10 +36,17 @@ fn call(method: &str, params: serde_json::Value) -> serde_json::Value {
         json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
     )
     .unwrap();
-    let mut state = State {
+    let state = State {
         greeting: "hello".into(),
     };
-    let response = handle_request::<Tools, State>(request, &mut state, &config());
+    let context = RequestContext::from_request(&request);
+    let response = pollster::block_on(handle_request::<Tools, State>(
+        request,
+        state,
+        context,
+        &config(),
+    ))
+    .expect("nothing here is cancellable");
     serde_json::to_value(response).unwrap()
 }
 
@@ -183,10 +196,17 @@ mod loopback {
         request: JsonRpcRequest,
     ) -> Result<Value, JsonRpcError> {
         let id = request.id.clone();
-        let mut state = State {
+        let state = State {
             greeting: "hello".into(),
         };
-        let response = handle_request::<Tools, State>(request, &mut state, &config());
+        let context = crate::RequestContext::from_request(&request);
+        let response = pollster::block_on(handle_request::<Tools, State>(
+            request,
+            state,
+            context,
+            &config(),
+        ))
+        .expect("nothing here is cancellable");
         match protocol.on_message(JsonRpcMessage::Response(response)) {
             Reaction::Result { id: got, result } => {
                 assert_eq!(got, id, "a response arrived for a request we did not send");
@@ -385,15 +405,13 @@ mod loopback {
 #[test]
 fn the_command_line_path_renders_text_without_a_client() {
     use mcplease::traits::Dispatch;
-    let mut state = State {
+    let state = State {
         greeting: "hi".into(),
     };
     let tool: Tools = serde_json::from_value(json!({
         "name": "echo", "arguments": {"message": "there"}
     }))
     .unwrap();
-    let text = tool
-        .call_to_text(&mut state, &RequestContext::default())
-        .unwrap();
+    let text = pollster::block_on(tool.call_to_text(state, RequestContext::default())).unwrap();
     assert_eq!(text, "hi, there");
 }

@@ -32,8 +32,8 @@
 use crate::types::{
     CacheScope, ClientCapabilities, DiscoverResult, Implementation, InitializeRequestParams,
     InitializeResult, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, LATEST_HANDSHAKE_PROTOCOL_VERSION, LATEST_PROTOCOL_VERSION, RequestId,
-    SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, meta_keys,
+    JsonRpcResponse, LATEST_HANDSHAKE_PROTOCOL_VERSION, LATEST_PROTOCOL_VERSION, ProgressToken,
+    RequestId, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, meta_keys,
 };
 use serde_json::{Map, Value, json};
 
@@ -80,12 +80,12 @@ impl ClientProtocol {
     /// The context a server on any revision will reconstruct from this
     /// client's requests — the client-side counterpart of
     /// [`RequestContext::from_params`](crate::types::RequestContext::from_params).
+    ///
+    /// Built by parsing this client's own `_meta`, so the two sides cannot
+    /// drift. It describes the client, not any one request, so it carries
+    /// neither a request id nor a progress token.
     pub fn request_context(&self) -> crate::types::RequestContext {
-        crate::types::RequestContext {
-            protocol_version: Some(self.declared_version().to_string()),
-            client_info: Some(self.client_info.clone()),
-            client_capabilities: self.capabilities.clone(),
-        }
+        crate::types::RequestContext::from_meta(Some(&self.meta()))
     }
 
     /// The version to declare on a request: the negotiated one, or — before
@@ -120,16 +120,72 @@ impl ClientProtocol {
     /// its params. Params that are not an object are left alone — there is
     /// nowhere to put `_meta` — which the spec's own request shapes never do.
     pub fn request(&mut self, method: impl Into<String>, params: Option<Value>) -> JsonRpcRequest {
+        self.build(method, params, false)
+    }
+
+    /// [`request`](Self::request), opting in to `notifications/progress`.
+    ///
+    /// The token *is* the request's own id. The spec requires only that a
+    /// token be unique across all active requests, which is the id's rule in
+    /// different words, so a separate namespace would buy nothing here but a
+    /// token-to-id table to evict on every response, abandon, and timeout.
+    /// [`Reaction::Progress`] therefore reports the id directly, and this
+    /// client stays as stateless as its counter.
+    ///
+    /// A client that multiplexes several upstream requests onto one connection
+    /// is the case that wants its own token namespace; it can stamp
+    /// [`meta_keys::PROGRESS_TOKEN`] itself with [`request`](Self::request).
+    ///
+    /// The server is never obliged to send anything back.
+    pub fn request_with_progress(
+        &mut self,
+        method: impl Into<String>,
+        params: Option<Value>,
+    ) -> JsonRpcRequest {
+        self.build(method, params, true)
+    }
+
+    fn build(
+        &mut self,
+        method: impl Into<String>,
+        params: Option<Value>,
+        progress: bool,
+    ) -> JsonRpcRequest {
         self.next_id += 1;
+        let mut meta = self.meta();
+        if progress {
+            meta.insert(meta_keys::PROGRESS_TOKEN.into(), json!(self.next_id));
+        }
         let params = match params {
             Some(Value::Object(mut params)) => {
-                params.insert("_meta".into(), Value::Object(self.meta()));
+                params.insert("_meta".into(), Value::Object(meta));
                 Some(Value::Object(params))
             }
-            None => Some(json!({ "_meta": self.meta() })),
+            None => Some(json!({ "_meta": meta })),
             other => other,
         };
         JsonRpcRequest::new(RequestId::Integer(self.next_id), method, params)
+    }
+
+    /// `notifications/cancelled`: ask the server to stop work on a request
+    /// this client issued and believes is still running.
+    ///
+    /// Only for stdio and other single-channel transports. Over streamable
+    /// HTTP, closing the request's response stream *is* the cancellation
+    /// signal and no notification is expected.
+    ///
+    /// Two rules this cannot enforce for you: `initialize` must never be
+    /// cancelled, and after sending this the client must ignore any response
+    /// to that id which still arrives. Which requests are outstanding is the
+    /// transport's bookkeeping, not this type's — the same place that already
+    /// decides whether a [`Reaction::Result`] is wanted or abandoned.
+    pub fn cancel(&self, request_id: &RequestId, reason: Option<&str>) -> JsonRpcNotification {
+        let mut params = Map::new();
+        params.insert("requestId".into(), json!(request_id));
+        if let Some(reason) = reason {
+            params.insert("reason".into(), json!(reason));
+        }
+        JsonRpcNotification::new("notifications/cancelled", Some(Value::Object(params)))
     }
 
     /// A one-way message. Notifications carry no `_meta`: there is no result
@@ -146,6 +202,15 @@ impl ClientProtocol {
     pub fn tools_list(&mut self, cursor: Option<&str>) -> JsonRpcRequest {
         let params = cursor.map(|cursor| json!({ "cursor": cursor }));
         self.request("tools/list", params)
+    }
+
+    /// [`tools_call`](Self::tools_call), opting in to progress notifications.
+    /// See [`request_with_progress`](Self::request_with_progress).
+    pub fn tools_call_with_progress(&mut self, name: &str, arguments: &Value) -> JsonRpcRequest {
+        self.request_with_progress(
+            "tools/call",
+            Some(json!({ "name": name, "arguments": arguments })),
+        )
     }
 
     /// `tools/call`, where `arguments` is the tool's input object.
@@ -199,23 +264,113 @@ impl ClientProtocol {
                 };
                 Reaction::Reply(response)
             }
-            JsonRpcMessage::Notification(notification) => {
-                log::debug!("ignoring server notification {}", notification.method);
-                Reaction::Ignore
+            JsonRpcMessage::Notification(notification) => classify_notification(notification),
+        }
+    }
+}
+
+/// Classify a server notification. Unrecognized methods are ignored rather
+/// than reported: a notification is fire-and-forget, and a server may send
+/// types this client never opted in to only by its own mistake.
+fn classify_notification(notification: JsonRpcNotification) -> Reaction {
+    let params = notification.params.unwrap_or(Value::Null);
+    let get = |key: &str| params.get(key).cloned();
+
+    match notification.method.as_str() {
+        "notifications/progress" => {
+            let Some(token) = get("progressToken")
+                .and_then(|value| serde_json::from_value::<ProgressToken>(value).ok())
+            else {
+                log::debug!("dropping a progress notification with no token");
+                return Reaction::Ignore;
+            };
+            let Some(progress) = get("progress").and_then(|value| value.as_f64()) else {
+                log::debug!("dropping a progress notification with no progress");
+                return Reaction::Ignore;
+            };
+            Reaction::Progress {
+                token,
+                progress,
+                total: get("total").and_then(|value| value.as_f64()),
+                message: get("message").and_then(|value| value.as_str().map(String::from)),
             }
+        }
+
+        // A server may send this for exactly one purpose: tearing down the
+        // `subscriptions/listen` stream whose request id this names.
+        "notifications/cancelled" => {
+            let Some(request_id) =
+                get("requestId").and_then(|value| serde_json::from_value::<RequestId>(value).ok())
+            else {
+                log::debug!("dropping a cancellation with no request id");
+                return Reaction::Ignore;
+            };
+            Reaction::SubscriptionEnded {
+                request_id,
+                reason: get("reason").and_then(|value| value.as_str().map(String::from)),
+            }
+        }
+
+        "notifications/message" => {
+            let Some(level) = get("level").and_then(|value| value.as_str().map(String::from))
+            else {
+                log::debug!("dropping a message notification with no level");
+                return Reaction::Ignore;
+            };
+            Reaction::Message {
+                level,
+                logger: get("logger").and_then(|value| value.as_str().map(String::from)),
+                data: get("data").unwrap_or(Value::Null),
+            }
+        }
+
+        other => {
+            log::debug!("ignoring server notification {other}");
+            Reaction::Ignore
         }
     }
 }
 
 /// What a transport should do with a message [`ClientProtocol::on_message`]
 /// just classified.
+///
+/// `#[non_exhaustive]`: the protocol keeps adding server-initiated traffic,
+/// and each addition would otherwise break every exhaustive match.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Reaction {
     /// A response arrived. The transport compares `id` against the requests it
     /// has outstanding: its own, or one it abandoned and should drop.
     Result {
         id: RequestId,
         result: Result<Value, JsonRpcError>,
+    },
+    /// Progress on a request still outstanding. `token` is whatever the
+    /// request carried — the request's own id, for one built with
+    /// [`ClientProtocol::request_with_progress`]. Advisory: a transport may
+    /// use it to reset that request's timeout, but should keep a maximum
+    /// regardless, as the spec directs.
+    Progress {
+        token: ProgressToken,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>,
+    },
+    /// The server tore down the `subscriptions/listen` stream opened by
+    /// `request_id`. This is the only purpose for which a server may send
+    /// `notifications/cancelled`.
+    SubscriptionEnded {
+        request_id: RequestId,
+        reason: Option<String>,
+    },
+    /// A `notifications/message` log line, sent for the client's logging UI.
+    /// `level` is the spec's own vocabulary (`debug` through `emergency`)
+    /// passed through unparsed, so a level newer than this client is
+    /// delivered rather than dropped; `data` is the line's payload.
+    Message {
+        level: String,
+        logger: Option<String>,
+        data: Value,
     },
     /// A reply the transport should send if it has a channel to send it on.
     /// Advisory: a transport reading a per-request SSE stream has no way to

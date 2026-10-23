@@ -1,18 +1,26 @@
 # MCPlease
 
 MCPlease is a lightweight Rust framework for building MCP (Model Context Protocol) servers. It
-provides a simple, macro-driven approach to defining tools and managing state, with optional support
-for session persistence and cross-process synchronization.
+provides a simple, macro-driven approach to defining tools, and tracks the `2026-07-28` revision of
+the protocol.
 
 ## Features
 
 - **Simple tool definition** using the `tools!` macro
 - **Automatic JSON Schema generation** from Rust structs using `schemars`
-- **Session management** with cross-process synchronization via file watching
+- **Concurrent async dispatch** — calls run alongside each other, with progress
+  notifications and cancellation, on whatever runtime your binary brings
 - **Command-line interface** with automatic help generation via `clap`
 - **Example system** for better tool documentation
-- **Stdio-based MCP communication** (WebSocket support planned)
+- **Stdio transport** included; the protocol core does no I/O, so any transport can use it
 - **Code generation CLI** for rapid development
+
+## Bring your own runtime
+
+Tools are `async fn`s, and this crate names no runtime and starts none: the binary brings one. The
+stdio transport runs over any `futures-lite` `AsyncRead`/`AsyncWrite` pair — smol's `Unblock`, or
+tokio's stdio through `async-compat` — and hands out each tool call as a self-contained future for
+the binary to spawn. `mcplease create --runtime smol|tokio` writes that `main` for you.
 
 ## Quick Start with CLI (Recommended)
 
@@ -22,7 +30,7 @@ The fastest way to get started is with the mcplease CLI tool:
 # Install the CLI
 cargo install mcplease-cli
 
-# Create a new MCP server with tools
+# Create a new MCP server with tools (`--runtime tokio` for tokio; smol is the default)
 mcplease create my-server --tools hello,goodbye,status --state MyServerState
 
 # Navigate to your project
@@ -63,53 +71,44 @@ cd my-mcp-server
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.11"
 fieldwork = "0.4.6"
 mcplease = "0.3.0"
 schemars = "1.0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+smol = "2"
 ```
 
 ### 3. Define your state structure
+
+State is `Clone + Send + Sync + 'static` and every call gets its own clone, so it holds shared
+handles rather than owned data. `Clone` rather than `Arc<State>` because the things you actually
+hold — a pool, a client, a channel sender — are already internally shared.
+
+It is *not* a place to keep per-caller state. `2026-07-28` removed protocol sessions and made every
+request carry its own context, so anything that varies by caller belongs in the request: a tool
+argument, or a token you hand the client and it hands back.
 
 Create `src/state.rs`:
 
 ```rust
 use anyhow::Result;
-use mcplease::session::SessionStore;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct SharedData {
-    pub working_directory: Option<PathBuf>,
-    // Add other shared state fields here
-}
-
-#[derive(Debug, fieldwork::Fieldwork)]
+#[derive(Debug, Clone)]
 pub struct MyToolsState {
-    #[fieldwork(get, get_mut)]
-    session_store: SessionStore<SharedData>,
+    /// Read-only and shared: cloning is an `Arc` bump.
+    config: Arc<Config>,
+    /// Mutated by tools running at the same time, so it carries its own lock.
+    cache: Arc<Mutex<Cache>>,
 }
 
 impl MyToolsState {
     pub fn new() -> Result<Self> {
-        let session_store = SessionStore::new(Some(
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".ai-tools/sessions/my-tools.json")
-        ))?;
-        
-        Ok(Self { session_store })
-    }
-    
-    pub fn get_working_directory(&mut self) -> Result<Option<PathBuf>> {
-        Ok(self.session_store.get_or_create("default")?.working_directory.clone())
-    }
-    
-    pub fn set_working_directory(&mut self, path: PathBuf) -> Result<()> {
-        self.session_store.update("default", |data| {
-            data.working_directory = Some(path);
+        Ok(Self {
+            config: Arc::new(Config::load()?),
+            cache: Arc::default(),
         })
     }
 }
@@ -166,7 +165,7 @@ impl ToolMeta for Hello {
 impl Tool<MyToolsState> for Hello {
     type Output = String;
 
-    fn execute(self, _state: &mut MyToolsState, _context: &RequestContext) -> Result<String> {
+    async fn execute(self, _state: MyToolsState, _context: RequestContext) -> Result<String> {
         let greeting = if self.enthusiastic.unwrap_or(false) {
             format!("Hello, {}! 🎉", self.name)
         } else {
@@ -177,51 +176,48 @@ impl Tool<MyToolsState> for Hello {
 }
 ```
 
-**src/tools/set_working_directory.rs:**
+**src/tools/count.rs** — a slow tool that reports progress and honors cancellation:
 ```rust
 use crate::state::MyToolsState;
 use anyhow::Result;
 use mcplease::{
     traits::{Tool, ToolMeta},
-    types::{Example, RequestContext},
+    types::RequestContext,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
-/// Set the working directory for relative path operations
+/// Process a batch of items.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, clap::Args)]
-#[serde(rename = "set_working_directory")]
-pub struct SetWorkingDirectory {
-    /// New working directory path
-    pub path: String,
+#[serde(rename = "count")]
+pub struct Count {
+    /// How many items to process.
+    pub items: u32,
 }
 
-impl ToolMeta for SetWorkingDirectory {
-    fn examples() -> Vec<Example<Self>> {
-        vec![
-            Example {
-                description: "Set working directory to a project folder",
-                item: Self {
-                    path: "/path/to/my/project".into(),
-                },
-            },
-        ]
-    }
-}
+impl ToolMeta for Count {}
 
-impl Tool<MyToolsState> for SetWorkingDirectory {
-    fn execute(self, state: &mut MyToolsState, _context: &RequestContext) -> Result<String> {
-        let path = PathBuf::from(&*shellexpand::tilde(&self.path));
-        
-        if !path.exists() {
-            return Ok(format!("Directory {} does not exist", path.display()));
+impl Tool<MyToolsState> for Count {
+    type Output = String;
+
+    async fn execute(self, _state: MyToolsState, context: RequestContext) -> Result<String> {
+        let total = f64::from(self.items);
+        for item in 1..=self.items {
+            // Silent unless the client asked for progress by sending a
+            // `progressToken`, and `?` here is how this tool stops when the
+            // client cancels.
+            context.progress(f64::from(item), Some(total), Some("processing"))?;
         }
-        
-        state.set_working_directory(path.clone())?;
-        Ok(format!("Set working directory to {}", path.display()))
+        Ok(format!("processed {} items", self.items))
     }
 }
 ```
+
+A cancelled call's future is dropped at its next await point, so an async tool stops without
+looking. Code with no await in it — like the loop above — cannot be interrupted, so it checks:
+`progress` returning `Err(Cancelled)` is the usual checkpoint, [`RequestContext::is_cancelled`] is
+there for a tool with nothing to report, and [`RequestContext::cancelled`] is a future for racing
+work handed off elsewhere. Either way the transport sends no response for a cancelled call, which is
+what the spec asks for.
 
 ### 5. Wire everything together
 
@@ -232,9 +228,13 @@ use crate::state::MyToolsState;
 mcplease::tools!(
     MyToolsState,
     (Hello, hello, "hello"),
-    (SetWorkingDirectory, set_working_directory, "set_working_directory")
+    (Count, count, "count")
 );
 ```
+
+`Tools` derives clap's `Subcommand` so each tool can be run from a shell, which needs every
+tool to derive `clap::Args`. A server with no command line — embedded, or behind another
+transport — writes `mcplease::tools!(cli = false, MyToolsState, ...)` instead.
 
 **src/main.rs:**
 ```rust
@@ -242,17 +242,46 @@ mod state;
 mod tools;
 
 use anyhow::Result;
-use mcplease::{ServerConfig, server_info};
+use mcplease::{
+    Cli, ServerConfig, clap::Parser, server_info, traits::Dispatch, types::RequestContext,
+};
+use smol::{Executor, Unblock};
 use state::MyToolsState;
+use tools::Tools;
 
-const INSTRUCTIONS: &str = "This is my custom MCP server. Use set_working_directory to establish context.";
+const INSTRUCTIONS: &str = "This is my custom MCP server.";
 
 fn main() -> Result<()> {
-    let mut state = MyToolsState::new()?;
-    let config = ServerConfig::new(server_info!()).with_instructions(INSTRUCTIONS);
-    mcplease::run::<tools::Tools, _>(&mut state, config)
+    // stderr is the one place a stdio server may log.
+    env_logger::init();
+    let state = MyToolsState::new()?;
+
+    match Cli::<Tools>::parse() {
+        Cli::Tool(tool) => {
+            let output = smol::block_on(tool.call_to_text(state, RequestContext::default()))?;
+            println!("{output}");
+            Ok(())
+        }
+
+        Cli::Serve => {
+            let config = ServerConfig::new(server_info!()).with_instructions(INSTRUCTIONS);
+            let executor = Executor::new();
+            smol::block_on(executor.run(async {
+                let stdin = Unblock::new(std::io::stdin());
+                let stdout = Unblock::new(std::io::stdout());
+                let mut calls = mcplease::calls::<Tools, _>(stdin, stdout, state, &config);
+                while let Some(call) = calls.next().await {
+                    executor.spawn(call?).detach();
+                }
+                Ok(())
+            }))
+        }
+    }
 }
 ```
+
+On tokio, the same loop reads `Compat::new(tokio::io::stdin())` (from `async-compat`) and
+`tokio::spawn`s each call.
 
 ### 6. Run your server
 
@@ -262,7 +291,7 @@ cargo run serve
 
 # Or use tools directly from command line
 cargo run hello --name "World"
-cargo run set-working-directory --path "/tmp"
+cargo run count --items 10
 ```
 
 ## Framework Architecture
@@ -273,7 +302,7 @@ cargo run set-working-directory --path "/tmp"
 2. **`Tool` trait**: Defines how individual tools execute
 3. **`ToolMeta` trait**: Examples, behavior hints, title, and icons for a tool
 4. **`ToolOutput` trait**: What a tool returns — plain text or a structured value
-5. **`SessionStore`**: Handles persistent state with cross-process sync
+5. **`RequestContext`**: Who called, plus progress reporting and cancellation
 6. **JSON Schema generation**: Automatic from Rust structs via `schemars`
 
 ### Tool Definition Pattern
@@ -300,30 +329,48 @@ impl Tool<StateType> for MyTool { /* ... */ }
 
 ### State Management
 
-The framework uses `SessionStore<T>` for persistent state:
-
-- **Cross-process safe**: File watching detects external changes
-- **Atomic writes**: Temporary file + rename prevents corruption
-- **Session-based**: Multiple sessions can coexist
-- **JSON serialization**: Human-readable storage format
-
-### Session Store API
+State is a bundle of shared handles, cloned per call. Anything mutable carries its own lock or
+channel; the framework never hands out `&mut`.
 
 ```rust
-// Get or create session data
-let data = store.get_or_create("session_id")?;
-
-// Update data with closure
-store.update("session_id", |data| {
-    data.some_field = new_value;
-})?;
-
-// Get without creating
-let maybe_data = store.get("session_id")?;
-
-// Set directly
-store.set("session_id", new_data)?;
+#[derive(Clone)]
+pub struct State {
+    pool: sqlx::PgPool,          // already internally shared
+    cache: Arc<Mutex<Cache>>,    // shared and mutable, so it locks
+}
 ```
+
+Earlier versions shipped a `SessionStore<T>` for per-session state on disk. It is gone: it was the
+only I/O in a crate whose whole claim is that it does none, and it modeled a protocol session in a
+revision that removed sessions. A server that still wants it can vendor the module — it was
+self-contained — and pick its own filesystem story.
+
+### Concurrency
+
+Calls run concurrently, bounded by [`ServerConfig::with_max_concurrent_calls`]. A call arriving past
+the limit is refused immediately with `server busy` (`-32000`) rather than queued.
+
+Concurrency is what the protocol asks for: request ids and progress tokens must be unique across
+*active* requests, cancellation exists to stop one call while others continue, and
+`subscriptions/listen` is a request that never returns, which a serialized server would deadlock on.
+Tools are expected to be safe to run alongside each other — which for a multi-step tool sequence
+means keying its state by a token the client carries, rather than assuming it is the only one
+running. Setting the limit to `1` restores single-file execution while you get there.
+
+Every call is spawned, so tools share the executor with each other. A tool with a synchronous
+stretch — heavy computation, `std::fs`, waiting on a subprocess — moves it to a blocking pool
+(`smol::unblock`, `tokio::task::spawn_blocking`) rather than stalling its neighbours.
+
+`calls(reader, writer, state, &config)` is the transport, and the loop in `main` above is the whole
+driver. The stream answers `ping`, `tools/list` and friends itself, and hands out each admitted
+`tools/call` as a `Send + 'static` future. It ends only once the input has closed *and* every call
+has been answered, so a client that closes stdin and keeps reading gets every response. It yields
+`Err` once if the output fails; dropping it cancels the calls still running.
+
+Spawn every call. Awaiting each one before taking the next stops the stream — and with it pings,
+cancellations, and every other call — for as long as a tool runs.
+
+A tool that panics is answered with an internal error.
 
 ## Advanced Features
 
@@ -337,7 +384,7 @@ sees the failure and can correct itself:
 impl Tool<State> for MyTool {
     type Output = String;
 
-    fn execute(self, state: &mut State, _context: &RequestContext) -> Result<String> {
+    async fn execute(self, state: State, _context: RequestContext) -> Result<String> {
         // Use ? for error propagation
         let data = std::fs::read_to_string(&self.path)
             .with_context(|| format!("Failed to read {}", self.path))?;
@@ -397,7 +444,7 @@ mcplease::structured_output!(Weather);
 impl Tool<State> for GetWeather {
     type Output = Weather;
 
-    fn execute(self, state: &mut State, _context: &RequestContext) -> Result<Weather> {
+    async fn execute(self, state: State, _context: RequestContext) -> Result<Weather> {
         Ok(Weather { temperature: 22.5, conditions: "Partly cloudy".into() })
     }
 }
@@ -418,7 +465,7 @@ mark one block for the user and another for the model:
 impl Tool<State> for Render {
     type Output = Vec<ContentBlock>;
 
-    fn execute(self, state: &mut State, _context: &RequestContext) -> Result<Self::Output> {
+    async fn execute(self, state: State, _context: RequestContext) -> Result<Self::Output> {
         Ok(vec![
             ContentBlock::text("Rendered 3 charts."),
             ContentBlock::Image {
@@ -467,7 +514,7 @@ rebuilt for each call. On the command-line path it is empty, since there is no
 MCP client.
 
 ```rust
-fn execute(self, state: &mut State, context: &RequestContext) -> Result<String> {
+async fn execute(self, state: State, context: RequestContext) -> Result<String> {
     if let Some(client) = &context.client_info {
         log::info!("called by {} {}", client.name, client.version);
     }
@@ -486,10 +533,17 @@ let config = ServerConfig::new(server_info!())
     // time, so the default is generous (one hour).
     .with_tools_ttl_ms(60 * 60 * 1000)
     // Opt in only if the tool list is identical for every user.
-    .with_tools_cache_scope(CacheScope::Public);
+    .with_tools_cache_scope(CacheScope::Public)
+    // How many tool calls may run at once. A call past this is refused at
+    // once with `-32000 server busy` rather than queued. Default 16.
+    .with_max_concurrent_calls(16);
 
-mcplease::run::<tools::Tools, _>(&mut state, config)
+let mut calls = mcplease::calls::<Tools, _>(stdin, stdout, state, &config);
 ```
+
+Over stdio, `ping`, `initialize`, `server/discover`, and `tools/list` are answered by the stream
+itself, in order with the input, so protocol traffic never waits on a tool. See
+[Concurrency](#concurrency).
 
 ### Optional Parameters
 
@@ -519,30 +573,17 @@ impl MyTool {
 }
 ```
 
-### Shared Session Data
+### Sharing context between servers
 
-For tools that need to share context across processes:
+Earlier versions did this through a shared `SessionStore` file. With sessions gone from the protocol
+and `SessionStore` gone from this crate, the shape that survives a concurrent, session-free server
+is to make the shared thing explicit: hold a handle in state, and let the client name what it wants
+in the request.
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct SharedContext {
-    pub working_directory: Option<PathBuf>,
-    pub recent_files: Vec<PathBuf>,
-    pub user_preferences: HashMap<String, String>,
-}
-
-// In your state struct:
-impl MyState {
-    pub fn new() -> Result<Self> {
-        // Use a shared file for cross-server communication
-        let shared_store = SessionStore::new(Some(
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".ai-tools/sessions/shared-context.json")
-        ))?;
-        
-        Ok(Self { shared_store })
-    }
+#[derive(Clone)]
+pub struct MyState {
+    context: Arc<ContextService>,   // whatever backs it: a file, a socket, a daemon
 }
 ```
 
@@ -558,10 +599,12 @@ impl MyState {
 
 ### State Management
 
-1. **Minimal state**: Only persist what's necessary across calls
-2. **Default values**: Use `#[serde(default)]` for backward compatibility
-3. **Session IDs**: Use logical identifiers like "default", project names, etc.
-4. **Cleanup**: Consider implementing state cleanup for old sessions
+1. **Handles, not data**: State is cloned per call, so hold `Arc`s and pools
+2. **Lock what you mutate**: Calls run concurrently; nothing hands you `&mut`
+3. **Per-caller state goes in the request**: a tool argument or a token the client carries, not a
+   server-side session
+4. **Report progress**: anything that can take more than a moment should call
+   `context.progress(..)`, which is also how it learns it was cancelled
 
 ### Error Messages
 
@@ -597,14 +640,12 @@ fn resolve_path(base: Option<&Path>, input: &str) -> Result<PathBuf> {
 
 ### Logging
 
-Set `MCP_LOG_LOCATION` environment variable to enable logging:
+A generated server logs to stderr through `env_logger` — the one place the stdio transport lets a
+server write freely. Clients typically capture it.
 
 ```bash
-export MCP_LOG_LOCATION="~/.ai-tools/logs/my-server.log"
-cargo run serve
+RUST_LOG=debug cargo run serve
 ```
-
-Log levels: `RUST_LOG=trace,warn,error,debug,info`
 
 ### Testing Tools Directly
 
@@ -622,9 +663,13 @@ cargo run my-tool --help
 ### Common Issues
 
 1. **Schema validation errors**: Ensure all fields have proper serde attributes
-2. **Session conflicts**: Use unique session IDs for different contexts  
-3. **Path resolution**: Always handle both absolute and relative paths
-4. **JSON parsing**: Check that tool parameters match expected schema
+2. **`State: Clone + Send + Sync` not satisfied**: hold `Arc`s and locks rather than owned mutable
+   data; a `Box<dyn Fn>` field usually just needs `+ Sync` adding
+3. **Tools interfering with each other**: they now run concurrently — key any multi-step sequence by
+   a token the client carries, or set `with_max_concurrent_calls(1)` while you migrate
+4. **A tool call hangs everything else**: a blocking tool stalls the calls it shares a task with;
+   hand real blocking work to your runtime's offload
+5. **JSON parsing**: Check that tool parameters match expected schema
 
 ## Contributing
 

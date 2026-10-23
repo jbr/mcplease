@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use heck::{ToPascalCase, ToSnakeCase};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -52,6 +52,10 @@ enum Commands {
         /// Instructions for the MCP server
         #[arg(long)]
         instructions: Option<String>,
+
+        /// The async runtime the server runs its tool calls on
+        #[arg(long, value_enum, default_value_t = Runtime::Smol)]
+        runtime: Runtime,
     },
     /// Add a new tool to an existing project
     Add {
@@ -71,6 +75,7 @@ fn main() -> Result<()> {
             output,
             description,
             instructions,
+            runtime,
         } => {
             let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
 
@@ -85,6 +90,7 @@ fn main() -> Result<()> {
                     state: &state,
                     description: description.as_deref(),
                     instructions: instructions.as_deref(),
+                    runtime,
                 },
                 &output_dir,
             )?;
@@ -339,6 +345,16 @@ pub struct CreateOptions<'a> {
     pub state: &'a str,
     pub description: Option<&'a str>,
     pub instructions: Option<&'a str>,
+    pub runtime: Runtime,
+}
+
+/// The runtime a generated server brings. mcplease names none, so the binary
+/// chooses, and `main` is where the choice shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Runtime {
+    #[default]
+    Smol,
+    Tokio,
 }
 
 pub fn create_project(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
@@ -369,6 +385,15 @@ fn generate_cargo_toml(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let mcplease_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
     let mcplease_version = format!("{}.{}", mcplease_version.major, mcplease_version.minor);
 
+    let runtime_dependencies = match opts.runtime {
+        Runtime::Smol => "smol = \"2\"\n",
+        Runtime::Tokio => concat!(
+            "async-compat = \"0.2\"\n",
+            "tokio = { version = \"1\", features = [\"io-std\", \"macros\", \"rt-multi-thread\"] \
+             }\n",
+        ),
+    };
+
     let content = format!(
         r#"[package]
 name = "{name}"
@@ -379,11 +404,12 @@ description = "{description}"
 [dependencies]
 anyhow = "1"
 clap = {{ version = "4.5", features = ["derive"] }}
+env_logger = "0.11"
 mcplease = "{mcplease_version}"
 schemars = "1"
 serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1"
-"#,
+{runtime_dependencies}"#,
         name = opts.name,
         description = description
     );
@@ -399,21 +425,96 @@ fn generate_main_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
         .instructions
         .unwrap_or("TODO: Add instructions for your MCP server");
 
-    let file: File = parse_quote! {
-        mod state;
-        mod tools;
+    let file: File = match opts.runtime {
+        Runtime::Smol => parse_quote! {
+            mod state;
+            mod tools;
 
-        use anyhow::Result;
-        use mcplease::{server_info, ServerConfig};
-        use state::#state_ident;
+            use anyhow::Result;
+            use mcplease::{
+                Cli, ServerConfig, clap::Parser, server_info, traits::Dispatch,
+                types::RequestContext,
+            };
+            use smol::{Executor, Unblock};
+            use state::#state_ident;
+            use tools::Tools;
 
-        const INSTRUCTIONS: &str = #instructions;
+            const INSTRUCTIONS: &str = #instructions;
 
-        fn main() -> Result<()> {
-            let mut state = #state_ident::new()?;
-            let config = ServerConfig::new(server_info!()).with_instructions(INSTRUCTIONS);
-            mcplease::run::<tools::Tools, _>(&mut state, config)
-        }
+            fn main() -> Result<()> {
+                // stderr is the one place a stdio server may log.
+                env_logger::init();
+                let state = #state_ident::new()?;
+
+                match Cli::<Tools>::parse() {
+                    Cli::Tool(tool) => {
+                        let output =
+                            smol::block_on(tool.call_to_text(state, RequestContext::default()))?;
+                        println!("{output}");
+                        Ok(())
+                    }
+
+                    Cli::Serve => {
+                        let config =
+                            ServerConfig::new(server_info!()).with_instructions(INSTRUCTIONS);
+                        let executor = Executor::new();
+                        smol::block_on(executor.run(async {
+                            let stdin = Unblock::new(std::io::stdin());
+                            let stdout = Unblock::new(std::io::stdout());
+                            let mut calls =
+                                mcplease::calls::<Tools, _>(stdin, stdout, state, &config);
+                            while let Some(call) = calls.next().await {
+                                executor.spawn(call?).detach();
+                            }
+                            Ok(())
+                        }))
+                    }
+                }
+            }
+        },
+
+        Runtime::Tokio => parse_quote! {
+            mod state;
+            mod tools;
+
+            use anyhow::Result;
+            use async_compat::Compat;
+            use mcplease::{
+                Cli, ServerConfig, clap::Parser, server_info, traits::Dispatch,
+                types::RequestContext,
+            };
+            use state::#state_ident;
+            use tools::Tools;
+
+            const INSTRUCTIONS: &str = #instructions;
+
+            #[tokio::main]
+            async fn main() -> Result<()> {
+                // stderr is the one place a stdio server may log.
+                env_logger::init();
+                let state = #state_ident::new()?;
+
+                match Cli::<Tools>::parse() {
+                    Cli::Tool(tool) => {
+                        let output = tool.call_to_text(state, RequestContext::default()).await?;
+                        println!("{output}");
+                    }
+
+                    Cli::Serve => {
+                        let config =
+                            ServerConfig::new(server_info!()).with_instructions(INSTRUCTIONS);
+                        let stdin = Compat::new(tokio::io::stdin());
+                        let stdout = Compat::new(tokio::io::stdout());
+                        let mut calls = mcplease::calls::<Tools, _>(stdin, stdout, state, &config);
+                        while let Some(call) = calls.next().await {
+                            tokio::spawn(call?);
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+        },
     };
 
     let content = prettyplease::unparse(&file);
@@ -428,14 +529,23 @@ fn generate_state_rs(opts: &CreateOptions, output_dir: &Path) -> Result<()> {
     let file: File = parse_quote! {
         use anyhow::Result;
 
-        /// State for the MCP server
+        /// State for the MCP server.
+        ///
+        /// Every call gets its own clone, so this is `Clone + Send + Sync`
+        /// and holds shared handles rather than owned data: an `Arc<T>`, a
+        /// connection pool, a client, a channel sender. Anything that has to
+        /// be mutated is behind its own lock or channel.
+        ///
+        /// It is not a place to keep per-caller state. `2026-07-28` removed
+        /// protocol sessions and every request carries its own context, so
+        /// anything that varies by caller belongs in the request — a tool
+        /// argument, or a token the client hands back — not here.
         ///
         /// TODO: Add your state fields here. Common patterns include:
-        /// - Working directory tracking
-        /// - Session management with mcplease::session::SessionStore
-        /// - Configuration data
-        /// - Cache or temporary data
-        #[derive(Debug)]
+        /// - A configuration handle shared across calls
+        /// - An `Arc` of something expensive to build
+        /// - A cache behind its own `Mutex` or `RwLock`
+        #[derive(Debug, Clone)]
         pub struct #state_ident {
             // TODO: Add your state fields here
         }
@@ -541,10 +651,14 @@ fn generate_tool_file(tool_name: &str, state_name: &str, output_dir: &Path) -> R
             /// result that a client can display without parsing this string.
             type Output = String;
 
-            fn execute(
+            /// Runs alongside other calls on the server's executor, so
+            /// anything that blocks — heavy computation, `std::fs`, waiting
+            /// on a subprocess — belongs on a blocking pool
+            /// (`smol::unblock`, `tokio::task::spawn_blocking`).
+            async fn execute(
                 self,
-                _state: &mut #state_ident,
-                _context: &RequestContext,
+                _state: #state_ident,
+                _context: RequestContext,
             ) -> Result<Self::Output> {
                 // TODO: Implement tool logic
                 Ok(format!("{} executed with param: {}", #snake_name, self.example_param))

@@ -13,8 +13,9 @@
 //! clients to treat an absent `resultType` as `"complete"`.
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
-use std::borrow::Cow;
+use serde_json::{Map, Value, json};
+use std::{borrow::Cow, future::pending, sync::Arc};
+use swansong::Swansong;
 
 /// The newest protocol revision these types model.
 pub const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -156,6 +157,10 @@ pub mod error_codes {
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
     pub const INTERNAL_ERROR: i64 = -32603;
+    /// Implementation-defined (JSON-RPC reserves `-32000..=-32099` for
+    /// servers): a `tools/call` refused because the server is already running
+    /// as many calls as it allows.
+    pub const SERVER_BUSY: i64 = -32000;
     pub const HEADER_MISMATCH: i64 = -32020;
     pub const MISSING_REQUIRED_CLIENT_CAPABILITY: i64 = -32021;
     pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
@@ -179,6 +184,14 @@ impl JsonRpcError {
         }
     }
 
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            code: error_codes::INVALID_REQUEST,
+            message: message.into(),
+            data: None,
+        }
+    }
+
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self {
             code: error_codes::INVALID_PARAMS,
@@ -191,6 +204,17 @@ impl JsonRpcError {
         Self {
             code: error_codes::INTERNAL_ERROR,
             message: message.into(),
+            data: None,
+        }
+    }
+
+    /// The overload answer: the server is already running as many calls as
+    /// it allows, and this one was not accepted. The client may retry later; nothing was
+    /// run. See [`ServerConfig::with_max_concurrent_calls`](crate::ServerConfig::with_max_concurrent_calls).
+    pub fn server_busy() -> Self {
+        Self {
+            code: error_codes::SERVER_BUSY,
+            message: "server busy: too many calls in flight".into(),
             data: None,
         }
     }
@@ -457,6 +481,10 @@ pub mod meta_keys {
     /// Correlates a notification with the `subscriptions/listen` stream it
     /// arrived on.
     pub const SUBSCRIPTION_ID: &str = "io.modelcontextprotocol/subscriptionId";
+    /// Opt in to `notifications/progress` for this request. Unlike the keys
+    /// above this one is *not* namespaced: it predates the `_meta` naming
+    /// rules and the schema spells it bare.
+    pub const PROGRESS_TOKEN: &str = "progressToken";
 }
 
 // --- tools ---
@@ -651,7 +679,79 @@ impl<'de> Deserialize<'de> for ToolCallOutcome {
 
 // --- request context ---
 
-/// What a request tells a tool about its caller.
+/// A progress token: a string or an integer.
+///
+/// Distinct from [`RequestId`] despite the identical shape. The spec calls it
+/// "an opaque token", chosen by the client by any means, required only to be
+/// unique across all *active* requests — the same scope as a request id, but
+/// deliberately its own namespace, so that a client multiplexing several
+/// upstream requests onto one connection can pick tokens without colliding
+/// with ids it had to rewrite.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProgressToken {
+    String(String),
+    Integer(i64),
+}
+
+impl From<i64> for ProgressToken {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<String> for ProgressToken {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for ProgressToken {
+    fn from(value: &str) -> Self {
+        Self::String(value.into())
+    }
+}
+
+/// A request was cancelled and should stop.
+///
+/// Returned by [`RequestContext::progress`] so that a tool which reports
+/// progress gets cancellation checks at the points it already has, and `?`
+/// does the right thing. The spec's rule is that a cancelled request gets no
+/// response at all, so returning this out of a tool is not an error the client
+/// will ever see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Where a server-initiated message goes.
+///
+/// Object-safe and general rather than progress-specific: the same sink
+/// carries `notifications/progress` today and the `notifications/subscriptions/*`
+/// traffic of a [`subscriptions/listen`] stream later, which needs arbitrary
+/// methods and its own `_meta`.
+///
+/// Sync and infallible by design. The obvious implementations push onto a
+/// queue that one writer drains — stdio's, or an SSE body's — which is not an
+/// await point, so a tool reporting
+/// progress in a hot loop never has to `.await` telemetry. A transport that
+/// cannot deliver a notification drops it and logs; progress is best-effort,
+/// and the spec says "the receiver is not obligated to provide these".
+///
+/// [`subscriptions/listen`]: https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions
+pub trait Notifier: Send + Sync + 'static {
+    /// Deliver one notification, or drop it if this transport cannot.
+    fn notify(&self, notification: JsonRpcNotification);
+}
+
+/// What a request tells a tool about its caller, and what a tool can say back
+/// while it runs.
 ///
 /// `2026-07-28` removed the handshake, so protocol version and client
 /// capabilities arrive in every request's `_meta` instead of once at
@@ -659,19 +759,41 @@ impl<'de> Deserialize<'de> for ToolCallOutcome {
 /// servers from inferring them from prior requests, so this is rebuilt for
 /// each call rather than cached.
 ///
-/// Requests from earlier revisions carry none of this; every field is
+/// Beyond that data, this carries the two channels a long-running call needs:
+/// a [`Notifier`] to report [`progress`](Self::progress), and a [`Swansong`]
+/// the transport shuts down when the client cancels. Both are absent on the command-line path and
+/// in tests, where the corresponding methods are no-ops.
+///
+/// Requests from earlier revisions carry none of the `_meta`; every field is
 /// therefore optional or defaulted.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RequestContext {
-    /// The protocol version the caller declared for this request.
-    pub protocol_version: Option<String>,
-    /// The caller's self-reported identity. Not verified by the protocol —
-    /// for display, logging, and debugging only. Servers SHOULD NOT change
-    /// behavior based on it, and MUST NOT use it for security decisions.
-    pub client_info: Option<Implementation>,
-    /// What the caller supports *for this request*. Empty means no optional
-    /// capabilities.
-    pub client_capabilities: ClientCapabilities,
+    protocol_version: Option<String>,
+    client_info: Option<Implementation>,
+    client_capabilities: ClientCapabilities,
+    request_id: Option<RequestId>,
+    progress_token: Option<ProgressToken>,
+    notifier: Option<Arc<dyn Notifier>>,
+    connection_notifier: Option<Arc<dyn Notifier>>,
+    cancellation: Option<Swansong>,
+}
+
+impl std::fmt::Debug for RequestContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestContext")
+            .field("protocol_version", &self.protocol_version)
+            .field("client_info", &self.client_info)
+            .field("client_capabilities", &self.client_capabilities)
+            .field("request_id", &self.request_id)
+            .field("progress_token", &self.progress_token)
+            .field("notifier", &self.notifier.as_ref().map(|_| "..."))
+            .field(
+                "connection_notifier",
+                &self.connection_notifier.as_ref().map(|_| "..."),
+            )
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
 }
 
 impl RequestContext {
@@ -695,10 +817,18 @@ impl RequestContext {
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default(),
+            progress_token: meta
+                .get(meta_keys::PROGRESS_TOKEN)
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+            ..Self::default()
         }
     }
 
     /// Pull the `_meta` out of a request's `params` and build a context.
+    ///
+    /// The result has no [`request_id`](Self::request_id); use
+    /// [`from_request`](Self::from_request) where the whole request is in hand.
     pub fn from_params(params: Option<&Value>) -> Self {
         Self::from_meta(
             params
@@ -707,10 +837,261 @@ impl RequestContext {
         )
     }
 
+    /// Build a context from a whole request, which is the only way to get the
+    /// request id. Cancellation names it, and a `subscriptions/listen` id *is*
+    /// the subscription id.
+    pub fn from_request(request: &JsonRpcRequest) -> Self {
+        Self {
+            request_id: Some(request.id.clone()),
+            ..Self::from_params(request.params.as_ref())
+        }
+    }
+
+    /// Attach the transport's notification sink. Without one, [`progress`]
+    /// and [`notify`] are no-ops.
+    ///
+    /// [`progress`]: Self::progress
+    /// [`notify`]: Self::notify
+    pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Attach the transport's sink for notifications tied to no request. See
+    /// [`connection_notifier`](Self::connection_notifier).
+    pub fn with_connection_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
+        self.connection_notifier = Some(notifier);
+        self
+    }
+
+    /// Attach the [`Swansong`] the transport shuts down when this request is
+    /// cancelled — by a `notifications/cancelled` on stdio, a closed response
+    /// stream over HTTP, or the host's own shutdown.
+    ///
+    /// Usually a [`child`](Swansong::child) made for this one request, so it
+    /// can be cancelled alone while shutting down its parent cancels every
+    /// request under it. A transport that also runs the call inside
+    /// [`Swansong::interrupt`] gets cancellation at every await point for
+    /// free; [`is_cancelled`](Self::is_cancelled) and
+    /// [`cancelled`](Self::cancelled) are for the code between them.
+    pub fn with_cancellation(mut self, cancellation: Swansong) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    /// The protocol version the caller declared for this request.
+    pub fn protocol_version(&self) -> Option<&str> {
+        self.protocol_version.as_deref()
+    }
+
+    /// The caller's self-reported identity. Not verified by the protocol —
+    /// for display, logging, and debugging only. Servers SHOULD NOT change
+    /// behavior based on it, and MUST NOT use it for security decisions.
+    pub fn client_info(&self) -> Option<&Implementation> {
+        self.client_info.as_ref()
+    }
+
+    /// What the caller supports *for this request*. Empty means no optional
+    /// capabilities.
+    pub fn client_capabilities(&self) -> &ClientCapabilities {
+        &self.client_capabilities
+    }
+
+    /// This request's JSON-RPC id, when it came from a real request.
+    pub fn request_id(&self) -> Option<&RequestId> {
+        self.request_id.as_ref()
+    }
+
+    /// The token the caller attached to opt in to progress, if any. Its
+    /// presence *is* the opt-in: there is no capability to declare.
+    pub fn progress_token(&self) -> Option<&ProgressToken> {
+        self.progress_token.as_ref()
+    }
+
     /// Whether the caller declared support for elicitation on this request.
     /// A server MUST NOT send an elicitation `inputRequest` when this is false.
     pub fn supports_elicitation(&self) -> bool {
         self.client_capabilities.elicitation.is_some()
+    }
+
+    /// Whether the client has cancelled this request.
+    ///
+    /// The stdio transport drops a cancelled call's future at its next await
+    /// point, so an async tool rarely needs this. It is for the stretches with
+    /// no await in them — a synchronous loop — where nothing can interrupt a
+    /// tool that does not look. A tool that notices SHOULD stop and return
+    /// promptly; whatever it returns is discarded, since the spec directs a
+    /// server not to respond to a cancelled request.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancellation| !cancellation.state().is_running())
+    }
+
+    /// Resolves when the client cancels this request, and never without a
+    /// transport that can cancel. For racing work that is not itself an
+    /// await point the transport can interrupt — a blocking task handed to a
+    /// pool, say — against the cancellation.
+    pub async fn cancelled(&self) {
+        match &self.cancellation {
+            Some(cancellation) => cancellation.shutting_down().await,
+            None => pending().await,
+        }
+    }
+
+    /// Report progress on this request, and find out whether it is still
+    /// wanted.
+    ///
+    /// A no-op when the caller sent no `progressToken` or the transport has no
+    /// sink — which is the spec's own fallback, and why there is no server
+    /// capability for this. `progress` must increase with each notification
+    /// even when `total` is unknown; both may be fractional.
+    ///
+    /// Rate limiting is the caller's business. This crate does not coalesce or
+    /// throttle, and the spec asks both parties to avoid flooding.
+    pub fn progress(
+        &self,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<&str>,
+    ) -> Result<(), Cancelled> {
+        if self.is_cancelled() {
+            return Err(Cancelled);
+        }
+
+        let (Some(token), Some(notifier)) = (&self.progress_token, &self.notifier) else {
+            return Ok(());
+        };
+
+        let mut params = Map::new();
+        params.insert("progressToken".into(), json!(token));
+        params.insert("progress".into(), json!(progress));
+        if let Some(total) = total {
+            params.insert("total".into(), json!(total));
+        }
+        if let Some(message) = message {
+            params.insert("message".into(), json!(message));
+        }
+
+        notifier.notify(JsonRpcNotification::new(
+            "notifications/progress",
+            Some(Value::Object(params)),
+        ));
+
+        Ok(())
+    }
+
+    /// Send an arbitrary notification through this request's sink, or drop it
+    /// if there is none. The escape hatch [`progress`](Self::progress) is
+    /// built on.
+    pub fn notify(&self, notification: JsonRpcNotification) {
+        if let Some(notifier) = &self.notifier {
+            notifier.notify(notification);
+        }
+    }
+
+    /// The sink for notifications tied to no request — a
+    /// [`claude_channel`](crate::claude_channel) event, say — which a tool may
+    /// keep and use after its call has been answered.
+    ///
+    /// Present on a stdio connection; `None` on the command-line path and in
+    /// tests. What it delivers depends on the connection, not the call: only
+    /// revisions through `2025-11-25` allow such notifications, and only once
+    /// the client has finished the `initialize` handshake, so on a connection
+    /// that has not — including every `2026-07-28` one — it drops what it is
+    /// given.
+    pub fn connection_notifier(&self) -> Option<Arc<dyn Notifier>> {
+        self.connection_notifier.clone()
+    }
+}
+
+// --- logging ---
+
+/// The severity of a log message, in RFC 5424's order: [`Debug`] is the least
+/// severe and [`Emergency`] the most, so `Ord` compares severity and a
+/// threshold admits every level `>=` it.
+///
+/// Logging is deprecated in `2026-07-28`; revisions through `2025-11-25`
+/// carry it as `logging/setLevel` and `notifications/message`.
+///
+/// [`Debug`]: LoggingLevel::Debug
+/// [`Emergency`]: LoggingLevel::Emergency
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoggingLevel {
+    Debug,
+    Info,
+    Notice,
+    Warning,
+    Error,
+    Critical,
+    Alert,
+    Emergency,
+}
+
+/// `logging/setLevel` params: the least severe level the client wants sent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetLevelRequestParams {
+    pub level: LoggingLevel,
+}
+
+/// One log message from server to client, sent as a `notifications/message`.
+///
+/// A server sends these only after declaring the `logging` capability
+/// (`ServerConfig::with_logging`), and a transport that knows the
+/// connection's `logging/setLevel` drops the ones below it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoggingMessage {
+    pub level: LoggingLevel,
+    /// The name of the logger that emitted it, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logger: Option<String>,
+    /// The message itself: a string, or any JSON value.
+    pub data: Value,
+}
+
+impl LoggingMessage {
+    /// The notification method a log message is sent as.
+    pub const METHOD: &'static str = "notifications/message";
+
+    /// A message at `level` carrying `data`, from no named logger.
+    pub fn new(level: LoggingLevel, data: impl Into<Value>) -> Self {
+        Self {
+            level,
+            logger: None,
+            data: data.into(),
+        }
+    }
+
+    /// Name the logger that emitted this message.
+    pub fn with_logger(mut self, logger: impl Into<String>) -> Self {
+        self.logger = Some(logger.into());
+        self
+    }
+
+    /// The notification that carries this message.
+    pub fn into_notification(self) -> JsonRpcNotification {
+        JsonRpcNotification::new(Self::METHOD, serde_json::to_value(self).ok())
+    }
+
+    /// The level of `notification`, when it is a log message that carries
+    /// one. `None` for every other notification.
+    pub fn level_of(notification: &JsonRpcNotification) -> Option<LoggingLevel> {
+        if notification.method != Self::METHOD {
+            return None;
+        }
+        notification
+            .params
+            .as_ref()
+            .and_then(|params| params.get("level"))
+            .cloned()
+            .and_then(|level| serde_json::from_value(level).ok())
+    }
+}
+
+impl From<LoggingMessage> for JsonRpcNotification {
+    fn from(message: LoggingMessage) -> Self {
+        message.into_notification()
     }
 }
 

@@ -3,7 +3,7 @@
 // an ordinary build sees none of this.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-//! A simple framework for writing Model Context Protocol servers.
+//! A simple framework for writing Model Context Protocol servers and clients.
 //!
 //! The [`types`] and [`headers`] modules are unconditional — both sides of the
 //! protocol need all of them, and they cost nothing but serde. `headers` is
@@ -17,6 +17,14 @@
 //! `default-features = false, features = ["server"]`: that is [`traits`], the
 //! [`tools!`] macro, and [`handle_request`], which answers a decoded request
 //! without doing any I/O.
+//!
+//! Dispatch is async and concurrent, but this crate names no runtime and
+//! starts none: the binary brings one. [`calls`] runs the stdio transport over
+//! any `futures-lite` `AsyncRead`/`AsyncWrite` pair and hands each admitted
+//! `tools/call` back as a future for the binary to spawn. A transport supplies a
+//! [`Notifier`](types::Notifier) and a cancellation flag when it builds each
+//! request's [`RequestContext`](types::RequestContext); everything a tool can
+//! say mid-call goes through there.
 //!
 //! A *client* wants `default-features = false, features = ["client"]`: the
 //! [`client`] module, which is the same split from the other side — it builds
@@ -32,6 +40,8 @@
 #[macro_use]
 mod macros;
 
+#[cfg(feature = "server")]
+pub mod claude_channel;
 #[cfg(feature = "cli")]
 mod cli;
 #[cfg(feature = "client")]
@@ -42,20 +52,16 @@ mod server;
 mod stdio;
 
 pub mod headers;
-#[cfg(feature = "session")]
-pub mod session;
 #[cfg(feature = "server")]
 pub mod traits;
 pub mod types;
 
-#[cfg(any(feature = "server", feature = "session"))]
+#[cfg(feature = "server")]
 pub use anyhow;
 #[cfg(feature = "cli")]
 pub use clap;
 #[cfg(feature = "cli")]
-pub use cli::run;
-#[cfg(any(feature = "cli", feature = "session"))]
-pub use dirs;
+pub use cli::Cli;
 #[cfg(feature = "server")]
 pub use fieldwork;
 pub use log;
@@ -64,8 +70,10 @@ pub use schemars;
 pub use serde;
 pub use serde_json;
 #[cfg(feature = "server")]
-pub use server::{DEFAULT_TOOLS_TTL_MS, ServerConfig, handle_request};
-#[cfg(any(feature = "cli", feature = "session"))]
-pub use shellexpand;
+pub use server::{
+    DEFAULT_MAX_CONCURRENT_CALLS, DEFAULT_TOOLS_TTL_MS, ServerConfig, answer_stateless,
+    answer_tool_call, handle_request,
+};
 #[cfg(feature = "stdio")]
-pub use stdio::serve;
+pub use stdio::{Call, Calls, ConnectionNotifier, calls};
+pub use swansong;

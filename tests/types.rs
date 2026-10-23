@@ -200,12 +200,76 @@ fn request_context_reads_per_request_meta() {
         }
     })));
 
-    assert_eq!(context.protocol_version.as_deref(), Some("2026-07-28"));
-    assert_eq!(context.client_info.as_ref().unwrap().name, "harness");
+    assert_eq!(context.protocol_version(), Some("2026-07-28"));
+    assert_eq!(context.client_info().unwrap().name, "harness");
     assert!(context.supports_elicitation());
 
     // A request from an earlier revision carries none of this.
     let legacy = RequestContext::from_params(Some(&json!({"name": "t", "arguments": {}})));
-    assert_eq!(legacy.protocol_version, None);
+    assert_eq!(legacy.protocol_version(), None);
     assert!(!legacy.supports_elicitation());
+}
+
+#[test]
+fn request_context_cancellation_follows_its_swansong() {
+    use mcplease::swansong::Swansong;
+    use std::{
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
+    // Without a transport, nothing cancels and progress is a no-op.
+    let context = RequestContext::default();
+    assert!(!context.is_cancelled());
+    assert_eq!(context.progress(1.0, None, None), Ok(()));
+
+    let parent = Swansong::new();
+    let context = RequestContext::default().with_cancellation(parent.child());
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut cancelled = pin!(context.cancelled());
+    assert!(!context.is_cancelled());
+    assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+
+    // Shutting down the parent reaches every request under it.
+    parent.shut_down();
+    assert!(context.is_cancelled());
+    assert_eq!(context.progress(1.0, None, None), Err(Cancelled));
+    assert_eq!(cancelled.as_mut().poll(&mut cx), Poll::Ready(()));
+}
+
+#[cfg(feature = "server")]
+mod claude_channel {
+    use mcplease::claude_channel::{ChannelEvent, METHOD};
+    use serde_json::json;
+
+    #[test]
+    fn an_event_serializes_to_the_channel_notification() {
+        let notification = ChannelEvent::new("build failed on main")
+            .with_meta("severity", "high")
+            .with_meta("run_id", "1234")
+            .into_notification();
+        assert_eq!(notification.method, METHOD);
+        assert_eq!(
+            serde_json::to_string(&notification).unwrap(),
+            r#"{"jsonrpc":"2.0","method":"notifications/claude/channel","params":{"content":"build failed on main","meta":{"run_id":"1234","severity":"high"}}}"#
+        );
+    }
+
+    #[test]
+    fn an_event_without_attributes_omits_meta() {
+        let notification = ChannelEvent::new("hello").into_notification();
+        assert_eq!(notification.params, Some(json!({"content": "hello"})));
+    }
+
+    /// Claude Code drops these keys silently; dropping them here keeps what
+    /// the server believes it sent equal to what the model reads.
+    #[test]
+    fn attribute_keys_claude_code_would_drop_are_dropped() {
+        let event = ChannelEvent::new("x")
+            .with_meta("run-id", "1")
+            .with_meta("", "2")
+            .with_meta("run.id", "3")
+            .with_meta("run_id2", "4");
+        assert_eq!(event.meta().keys().collect::<Vec<_>>(), ["run_id2"]);
+    }
 }

@@ -5,9 +5,10 @@
 #![cfg(feature = "client")]
 
 use mcplease::{
-    client::{ClientProtocol, Negotiation, NegotiationError, Step},
+    client::{ClientProtocol, Negotiation, NegotiationError, Reaction, Step},
     types::{
-        ClientCapabilities, Implementation, JsonRpcError, LATEST_PROTOCOL_VERSION, RequestContext,
+        ClientCapabilities, Implementation, JsonRpcError, JsonRpcMessage, JsonRpcNotification,
+        LATEST_PROTOCOL_VERSION, ProgressToken, RequestContext, RequestId,
         SUPPORTED_PROTOCOL_VERSIONS,
     },
 };
@@ -31,12 +32,12 @@ fn every_request_carries_the_meta_a_server_rebuilds_its_context_from() {
     let context = RequestContext::from_params(request.params.as_ref());
 
     assert_eq!(
-        context.protocol_version.as_deref(),
+        context.protocol_version(),
         // Nothing has been negotiated yet, and a `2026-07-28` server must
         // still be told something on the very first request.
         Some(LATEST_PROTOCOL_VERSION)
     );
-    let client_info = context.client_info.as_ref().expect("clientInfo");
+    let client_info = context.client_info().expect("clientInfo");
     assert_eq!(client_info.name, "test-client");
     assert_eq!(client_info.version, "9.9.9");
     assert!(context.supports_elicitation());
@@ -52,7 +53,7 @@ fn a_paramless_request_still_carries_meta() {
     let mut protocol = client();
     let request = protocol.request("ping", None);
     let context = RequestContext::from_params(request.params.as_ref());
-    assert_eq!(context.client_info.unwrap().name, "test-client");
+    assert_eq!(context.client_info().unwrap().name, "test-client");
 }
 
 #[test]
@@ -131,4 +132,108 @@ fn an_unparseable_result_names_the_method_it_came_from() {
         panic!("expected the negotiation to fail");
     };
     assert!(error.to_string().contains("server/discover"));
+}
+
+#[test]
+fn a_progress_request_stamps_its_own_id_as_the_token() {
+    let mut protocol = ClientProtocol::new(Implementation::new("test-client", "0.1.0"));
+    let request = protocol.tools_call_with_progress("echo", &json!({"message": "hi"}));
+
+    let meta = &request.params.as_ref().unwrap()["_meta"];
+    assert_eq!(meta["progressToken"], json!(1));
+    assert_eq!(request.id, RequestId::Integer(1));
+
+    // An ordinary request opts out by carrying no token at all.
+    let plain = protocol.tools_call("echo", &json!({"message": "hi"}));
+    assert!(
+        plain.params.as_ref().unwrap()["_meta"]
+            .get("progressToken")
+            .is_none()
+    );
+}
+
+#[test]
+fn progress_notifications_are_classified_with_their_token() {
+    let mut protocol = ClientProtocol::new(Implementation::new("test-client", "0.1.0"));
+    let notification = JsonRpcMessage::Notification(JsonRpcNotification::new(
+        "notifications/progress",
+        Some(json!({
+            "progressToken": 1,
+            "progress": 2.5,
+            "total": 10,
+            "message": "halfway-ish"
+        })),
+    ));
+
+    match protocol.on_message(notification) {
+        Reaction::Progress {
+            token,
+            progress,
+            total,
+            message,
+        } => {
+            assert_eq!(token, ProgressToken::Integer(1));
+            assert_eq!(progress, 2.5);
+            assert_eq!(total, Some(10.0));
+            assert_eq!(message.as_deref(), Some("halfway-ish"));
+        }
+        other => panic!("expected progress, got {other:?}"),
+    }
+}
+
+/// A server may send `notifications/cancelled` for exactly one reason.
+#[test]
+fn a_server_cancellation_is_a_subscription_teardown() {
+    let mut protocol = ClientProtocol::new(Implementation::new("test-client", "0.1.0"));
+    let notification = JsonRpcMessage::Notification(JsonRpcNotification::new(
+        "notifications/cancelled",
+        Some(json!({"requestId": 7, "reason": "stream closed"})),
+    ));
+
+    match protocol.on_message(notification) {
+        Reaction::SubscriptionEnded { request_id, reason } => {
+            assert_eq!(request_id, RequestId::Integer(7));
+            assert_eq!(reason.as_deref(), Some("stream closed"));
+        }
+        other => panic!("expected a subscription teardown, got {other:?}"),
+    }
+}
+
+#[test]
+fn message_notifications_are_classified_with_their_level() {
+    let mut protocol = ClientProtocol::new(Implementation::new("test-client", "0.1.0"));
+    let notification = JsonRpcMessage::Notification(JsonRpcNotification::new(
+        "notifications/message",
+        Some(json!({
+            "level": "warning",
+            "logger": "indexer",
+            "data": { "text": "still indexing" }
+        })),
+    ));
+
+    match protocol.on_message(notification) {
+        Reaction::Message {
+            level,
+            logger,
+            data,
+        } => {
+            assert_eq!(level, "warning");
+            assert_eq!(logger.as_deref(), Some("indexer"));
+            assert_eq!(data, json!({ "text": "still indexing" }));
+        }
+        other => panic!("expected a message, got {other:?}"),
+    }
+}
+
+#[test]
+fn cancel_builds_a_notification_naming_the_request() {
+    let protocol = ClientProtocol::new(Implementation::new("test-client", "0.1.0"));
+    let notification = protocol.cancel(&RequestId::Integer(3), Some("user hit escape"));
+
+    assert_eq!(notification.method, "notifications/cancelled");
+    let params = notification.params.unwrap();
+    assert_eq!(params["requestId"], json!(3));
+    assert_eq!(params["reason"], "user hit escape");
+    // A notification carries no `_meta`: there is nothing to correlate.
+    assert!(params.get("_meta").is_none());
 }
