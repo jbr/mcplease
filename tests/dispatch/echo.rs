@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 /// so it is needed exactly when mcplease's `cli` feature is on — a server on
 /// another transport does not derive it, and does not depend on clap.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(clap::Args))]
 pub struct Echo {
     /// What to echo.
     pub message: String,
@@ -24,7 +23,7 @@ impl ToolMeta for Echo {}
 impl Tool<State> for Echo {
     type Output = String;
 
-    fn execute(self, state: &mut State, _context: &RequestContext) -> Result<Self::Output> {
+    async fn execute(self, state: State, _context: RequestContext) -> Result<Self::Output> {
         if self.message.is_empty() {
             bail!("nothing to echo");
         }

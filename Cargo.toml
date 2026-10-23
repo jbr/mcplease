@@ -9,13 +9,12 @@ edition = "2024"
 description = "simple mcp framework"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jbr/mcplease"
-readme = "README.md"
 exclude = ["spec"]
 keywords = ["mcp"]
 categories = ["development-tools"]
 
 [package.metadata.docs.rs]
-features = ["cli", "client", "session", "stdio", "server"]
+features = ["cli", "client", "stdio", "server"]
 # Turns on `feature(doc_cfg)` in lib.rs, which labels every feature-gated item
 # with the feature that enables it.
 rustdoc-args = ["--cfg", "docsrs"]
@@ -24,25 +23,28 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # Always on: the protocol types need nothing but serde, and `log` is a facade
 # with no transitive dependencies.
-log = "0.4.33"
+log = "0.4.34"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
+# Cancellation. Unconditional because `RequestContext` carries it and is a
+# protocol type; runtime-free, and it is the handle a host uses to wire
+# mcplease into its own shutdown tree.
+swansong = "0.3.7"
 
 # `server`
 anyhow = { version = "1.0.104", optional = true }
-fieldwork = { version = "0.5.3", optional = true }
-schemars = { version = "1.2.2", optional = true }
+fieldwork = { version = "0.5.5", optional = true }
+schemars = { version = "1.2.3", optional = true }
 
 # `cli`
-clap = { version = "4.6.6", features = ["derive"], optional = true }
-env_logger = { version = "0.11.11", optional = true }
+clap = { version = "4.6.7", features = ["derive"], optional = true }
 
-# `cli` and `session` (both locate and expand storage paths)
-dirs = { version = "6.0.0", optional = true }
-shellexpand = { version = "3.1.2", optional = true }
-
-# `session`
-notify = { version = "8.2.0", optional = true }
+# `stdio`: runtime-agnostic async I/O. `futures-lite` supplies the
+# `AsyncRead`/`AsyncWrite` traits every runtime can meet (tokio through
+# `async-compat`) and the line reader; `async-channel` is the output queue.
+# Neither pulls an I/O reactor or names a runtime.
+async-channel = { version = "2.5.0", optional = true }
+futures-lite = { version = "2.6.1", default-features = false, features = ["std"], optional = true }
 
 # The features name the two axes a consumer picks along: *what side of the
 # protocol* it implements, and *over what transport*. `types` is unconditional
@@ -52,7 +54,7 @@ notify = { version = "8.2.0", optional = true }
 # The default is everything, so a consumer that does not opt out is unaffected
 # by the split.
 [features]
-default = ["cli", "client", "session"]
+default = ["cli", "client"]
 
 # Author and dispatch tools, transport-agnostically: the `traits` module, the
 # `tools!` and `server_info!` macros, and `handle_request`, which maps a decoded
@@ -67,16 +69,21 @@ server = ["dep:anyhow", "dep:fieldwork", "dep:schemars"]
 # dependency beyond the unconditional three, so it is free to enable.
 client = []
 
-# The stdio transport: a blocking `serve` loop over stdin/stdout, the transport
-# every locally-spawned MCP server speaks.
-stdio = ["server"]
+# The stdio transport: `calls`, newline-delimited JSON-RPC over any async byte
+# stream — in practice stdin and stdout, the transport every locally-spawned
+# MCP server speaks.
+stdio = ["server", "dep:async-channel", "dep:futures-lite"]
 
-# The command-line path: `run`, which invokes a tool directly from argv via clap
-# (so a tool is testable without an MCP client) and otherwise starts `serve`.
-# This is what makes `tools!` derive clap's `Subcommand`.
-cli = ["stdio", "dep:clap", "dep:dirs", "dep:env_logger", "dep:shellexpand"]
+# The command-line path: `Cli`, which parses argv into either one tool to run
+# directly (so a tool is testable without an MCP client) or `serve`. This is
+# what makes `tools!` derive clap's `Subcommand`.
+cli = ["stdio", "dep:clap"]
 
-# `SessionStore`: per-session state persisted to disk and kept in sync across
-# processes with a file watcher. Orthogonal to both axes — a server on any
-# transport may or may not want it — and the only thing that pulls `notify`.
-session = ["dep:anyhow", "dep:dirs", "dep:notify", "dep:shellexpand"]
+
+[dev-dependencies]
+# The tests drive async dispatch under every feature set, not only `cli`.
+pollster = "1.0.1"
+# The stdio tests spawn calls the way a host does.
+async-channel = "2.5.0"
+async-executor = "1.14.0"
+futures-lite = "2.6.1"

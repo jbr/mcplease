@@ -27,6 +27,8 @@ mcplease create <PROJECT_NAME> --tools <TOOL1,TOOL2,...> [OPTIONS]
 - `--output <DIR>` - Output directory (default: same as project name)
 - `--description <DESC>` - Project description for Cargo.toml
 - `--instructions <TEXT>` - Instructions for the MCP server
+- `--runtime <smol|tokio>` - The async runtime `main.rs` runs tool calls on (default: `smol`).
+  mcplease names no runtime, so the generated binary brings one and spawns each call onto it
 
 **Examples:**
 
@@ -51,7 +53,7 @@ mcplease create calculator \
 my-server/
 ├── Cargo.toml
 └── src/
-    ├── main.rs           # Entry point with server setup
+    ├── main.rs           # Entry point: argv parsing, runtime, and the serve loop
     ├── state.rs          # State struct definition
     ├── tools.rs          # Tools macro invocation
     └── tools/
@@ -128,7 +130,7 @@ impl WithExamples for ToolName {
 }
 
 impl Tool<MyState> for ToolName {
-    fn execute(self, _state: &mut MyState) -> Result<String> {
+    async fn execute(self, _state: MyState, _context: RequestContext) -> Result<String> {
         // TODO: Implement tool logic
         Ok(format!("tool_name executed with param: {}", self.example_param))
     }
@@ -137,19 +139,19 @@ impl Tool<MyState> for ToolName {
 
 ### State Template
 
-The generated state provides a foundation for session management:
+State is cloned per call and shared across calls running at the same time, so it holds handles
+rather than owned data:
 
 ```rust
 use anyhow::Result;
 
-/// State for the MCP server
+/// State for the MCP server.
 ///
 /// TODO: Add your state fields here. Common patterns include:
-/// - Working directory tracking
-/// - Session management with mcplease::session::SessionStore
-/// - Configuration data
-/// - Cache or temporary data
-#[derive(Debug)]
+/// - A configuration handle shared across calls
+/// - An `Arc` of something expensive to build
+/// - A cache behind its own `Mutex` or `RwLock`
+#[derive(Debug, Clone)]
 pub struct MyState {
     // TODO: Add your state fields here
 }
@@ -194,8 +196,22 @@ Edit the generated files in `src/tools/` to add your logic:
 ```rust
 // src/tools/hello.rs
 impl Tool<MyState> for Hello {
-    fn execute(self, _state: &mut MyState) -> Result<String> {
+    async fn execute(self, _state: MyState, _context: RequestContext) -> Result<String> {
         Ok(format!("Hello, {}!", self.name))
+    }
+}
+```
+
+A tool that can take a while should say so, which is also how it learns it was cancelled:
+
+```rust
+impl Tool<MyState> for Index {
+    async fn execute(self, state: MyState, context: RequestContext) -> Result<String> {
+        for (done, file) in state.files().enumerate() {
+            context.progress(done as f64, Some(state.total() as f64), Some("indexing"))?;
+            // ...
+        }
+        Ok("indexed".into())
     }
 }
 ```
@@ -204,11 +220,12 @@ impl Tool<MyState> for Hello {
 
 ```rust
 // src/state.rs
-use mcplease::session::SessionStore;
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MyState {
-    session_store: SessionStore<SessionData>,
+    config: Arc<Config>,
+    cache: Arc<Mutex<Cache>>,
 }
 ```
 
@@ -242,8 +259,10 @@ mcplease add version
 - **Provide good examples** - help users understand how to use your tools
 
 ### State Management
-- **Use SessionStore** for persistent data that survives restarts
-- **Keep state minimal** - only store what you actually need
+- **Hold handles, not data** - state is cloned for every call
+- **Lock what you mutate** - calls run concurrently and nothing hands you `&mut`
+- **Per-caller state goes in the request** - a tool argument or a token the client carries; the
+  protocol has no sessions
 - **Handle errors gracefully** - use `anyhow::Result` for clear error messages
 
 ### Code Organization
@@ -253,35 +272,29 @@ mcplease add version
 
 ## Advanced Usage
 
-### Custom State with Sessions
+### State shared across calls
 
 ```rust
-use mcplease::session::SessionStore;
-use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::{Arc, Mutex}};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct SessionData {
-    pub working_directory: Option<PathBuf>,
-    pub user_preferences: HashMap<String, String>,
+#[derive(Debug, Default)]
+pub struct Cache {
+    entries: HashMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MyState {
-    session_store: SessionStore<SessionData>,
+    cache: Arc<Mutex<Cache>>,
 }
 
 impl MyState {
     pub fn new() -> Result<Self> {
-        let session_store = SessionStore::new(Some(
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".my-server/sessions.json")
-        ))?;
-        Ok(Self { session_store })
+        Ok(Self { cache: Arc::default() })
     }
-    
-    pub fn get_working_directory(&mut self) -> Result<Option<PathBuf>> {
-        Ok(self.session_store.get_or_create("default")?.working_directory.clone())
+
+    /// `&self`, not `&mut self`: several calls may be in this at once.
+    pub fn remember(&self, key: &str, value: &str) {
+        self.cache.lock().unwrap().entries.insert(key.into(), value.into());
     }
 }
 ```

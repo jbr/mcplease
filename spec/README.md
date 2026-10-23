@@ -32,6 +32,15 @@ reference page is intentionally not vendored — it is the schema below, rendere
 
 The `.ts` is the more readable of the two: it carries the doc comments.
 
+## Vendor extensions — not MCP
+
+`claude-code/channels-reference.md` is Anthropic's contract for Claude Code
+*channels* (`src/claude_channel.rs`): an `experimental` capability and a
+vendor-namespaced notification. Neither is part of any MCP revision. It is a
+research preview, so re-fetch it from
+`https://code.claude.com/docs/en/channels-reference.md` before relying on a
+detail. Fetched 2026-10-02.
+
 ## Updating
 
 When moving to a newer revision, fetch its schema *and* its prose here first,

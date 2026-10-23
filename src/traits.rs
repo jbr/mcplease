@@ -10,6 +10,7 @@ use schemars::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use std::future::Future;
 
 /// Declarative metadata attached to a tool's advertised definition.
 ///
@@ -169,6 +170,33 @@ fn remove_null(schema: &mut Schema) {
     }
 }
 
+/// One tool: its arguments, its output type, and how to run it.
+///
+/// # Async, and why the future is `Send`
+///
+/// `execute` returns `impl Future + Send` rather than being an `async fn`,
+/// which is the same shape [`trillium::Handler::run`] uses and for the same
+/// reason: an opaque future with no declared `Send` cannot be proven `Send` by
+/// a *generic* caller, only by a concrete one, so a transport that wants to
+/// hand calls to a runtime could never do it. Declaring the bound costs
+/// nothing at the definition site — a tool that never awaits writes an `async
+/// fn` body with no awaits in it — and needs no `async-trait`, no boxing, and
+/// no runtime dependency anywhere in this crate.
+///
+/// # State by value
+///
+/// `State` is `Clone + Send + Sync + 'static` and arrives owned. A borrow
+/// would have to outlive every await in the body, which for a call a transport
+/// runs concurrently means `'static` anyway. `Clone` rather than `Arc<State>`
+/// because the handles people actually hold — a connection pool, an HTTP
+/// client, a channel sender — are already internally shared, and wrapping them
+/// again would be pure ceremony.
+///
+/// Servers hold no per-client state in `2026-07-28`: sessions were removed and
+/// every request carries its own context. State here is the server's shared
+/// resources, not a conversation.
+///
+/// [`trillium::Handler::run`]: https://docs.rs/trillium/latest/trillium/trait.Handler.html
 pub trait Tool<State>: Serialize + DeserializeOwned {
     /// What this tool returns. `String` for plain text; see [`ToolOutput`].
     type Output: ToolOutput;
@@ -176,9 +204,16 @@ pub trait Tool<State>: Serialize + DeserializeOwned {
     /// Run the tool.
     ///
     /// `context` describes the caller for *this* request — the spec forbids
-    /// carrying capabilities over from previous ones. On the command-line
-    /// path it is [`RequestContext::default`], since there is no MCP client.
-    fn execute(self, state: &mut State, context: &RequestContext) -> Result<Self::Output>;
+    /// carrying capabilities over from previous ones — and is also how a
+    /// long-running tool reports [`progress`](RequestContext::progress) and
+    /// notices [`cancellation`](RequestContext::is_cancelled). On the
+    /// command-line path it is [`RequestContext::default`], since there is no
+    /// MCP client: both of those are then no-ops.
+    fn execute(
+        self,
+        state: State,
+        context: RequestContext,
+    ) -> impl Future<Output = Result<Self::Output>> + Send;
 }
 
 /// Dispatch a decoded `tools/call` to the right tool.
@@ -189,10 +224,18 @@ pub trait Tool<State>: Serialize + DeserializeOwned {
 pub trait Dispatch<State>: Sized + DeserializeOwned {
     /// Run the tool and build its result, keeping both the model-facing
     /// content and the program-facing structured value.
-    fn call(self, state: &mut State, context: &RequestContext) -> Result<CallToolResult>;
+    fn call(
+        self,
+        state: State,
+        context: RequestContext,
+    ) -> impl Future<Output = Result<CallToolResult>> + Send;
 
     /// Run the tool and render it as plain text, for the command-line path.
-    fn call_to_text(self, state: &mut State, context: &RequestContext) -> Result<String>;
+    fn call_to_text(
+        self,
+        state: State,
+        context: RequestContext,
+    ) -> impl Future<Output = Result<String>> + Send;
 }
 
 /// Build a tool's advertised definition.

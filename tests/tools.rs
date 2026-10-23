@@ -55,7 +55,7 @@ impl ToolMeta for GetWeather {
 impl Tool<()> for GetWeather {
     type Output = Weather;
 
-    fn execute(self, _state: &mut (), _context: &RequestContext) -> Result<Self::Output> {
+    async fn execute(self, _state: (), _context: RequestContext) -> Result<Self::Output> {
         Ok(Weather {
             temperature: 22.5,
             conditions: "Partly cloudy".into(),
@@ -74,7 +74,7 @@ impl ToolMeta for Echo {}
 impl Tool<()> for Echo {
     type Output = String;
 
-    fn execute(self, _state: &mut (), _context: &RequestContext) -> Result<Self::Output> {
+    async fn execute(self, _state: (), _context: RequestContext) -> Result<Self::Output> {
         Ok(self.message)
     }
 }
@@ -86,10 +86,12 @@ fn structured_output_advertises_a_schema_and_fills_both_halves() {
     assert_eq!(output_schema["properties"]["temperature"]["type"], "number");
     assert_eq!(output_schema["type"], "object");
 
-    let weather = GetWeather {
-        location: "Portland".into(),
-    }
-    .execute(&mut (), &RequestContext::default())
+    let weather = pollster::block_on(
+        GetWeather {
+            location: "Portland".into(),
+        }
+        .execute((), RequestContext::default()),
+    )
     .unwrap();
 
     // The spec's recommended shape: the structured value, plus its serialized
@@ -118,10 +120,12 @@ fn string_output_stays_plain_text_with_no_structured_half() {
     assert_eq!(schema.title, None);
     assert!(schema.annotations.is_none());
 
-    let output = Echo {
-        message: "hello".into(),
-    }
-    .execute(&mut (), &RequestContext::default())
+    let output = pollster::block_on(
+        Echo {
+            message: "hello".into(),
+        }
+        .execute((), RequestContext::default()),
+    )
     .unwrap();
 
     // Not JSON-quoted: a String output is the text, verbatim.

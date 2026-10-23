@@ -3,7 +3,16 @@ use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
-fn test_create_project_compiles() {
+fn test_create_project_compiles_on_smol() {
+    assert_created_project_compiles(Runtime::Smol);
+}
+
+#[test]
+fn test_create_project_compiles_on_tokio() {
+    assert_created_project_compiles(Runtime::Tokio);
+}
+
+fn assert_created_project_compiles(runtime: Runtime) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let project_path = temp_dir.path().join("test-server");
 
@@ -17,6 +26,7 @@ fn test_create_project_compiles() {
         state: "TestState",
         description: Some("A test MCP server"),
         instructions: Some("Test instructions for the server"),
+        runtime,
     };
 
     // Create the project
@@ -32,11 +42,13 @@ fn test_create_project_compiles() {
     assert!(project_path.join("src/tools/status.rs").exists());
 
     // Point the generated project at this working copy rather than at the
-    // published crate. Required while the current version is unreleased, and
-    // it is what makes this test check the generated code against the library
-    // it was generated from.
+    // published crate, which is what makes this test check the generated code
+    // against the library it was generated from. The dependency line is
+    // rewritten rather than patched: `[patch.crates-io]` cannot redirect a
+    // requirement the registry has no release for, which is exactly the case
+    // while a breaking version is unreleased.
     let cargo_toml_path = project_path.join("Cargo.toml");
-    let mut cargo_content =
+    let cargo_content =
         std::fs::read_to_string(&cargo_toml_path).expect("Failed to read Cargo.toml");
 
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -44,10 +56,15 @@ fn test_create_project_compiles() {
         .parent()
         .expect("Failed to get parent directory");
 
-    cargo_content.push_str(&format!(
-        "\n[patch.crates-io]\nmcplease = {{ path = \"{}\" }}\n",
-        mcplease_path.display()
-    ));
+    let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let cargo_content = cargo_content.replace(
+        &format!("mcplease = \"{}.{}\"", version.major, version.minor),
+        &format!("mcplease = {{ path = \"{}\" }}", mcplease_path.display()),
+    );
+    assert!(
+        cargo_content.contains("mcplease = { path ="),
+        "the generated dependency line was not the one we expected to rewrite"
+    );
 
     std::fs::write(&cargo_toml_path, cargo_content).expect("Failed to write updated Cargo.toml");
 
@@ -79,6 +96,7 @@ fn test_cargo_toml_generation() {
         state: "State",
         description: Some("Custom description"),
         instructions: None,
+        runtime: Runtime::Smol,
     };
 
     fs::create_dir_all(&project_path).expect("Failed to create project directory");
@@ -114,7 +132,8 @@ fn test_tool_file_generation() {
     assert!(content.contains("impl Tool<MyState> for HelloWorld"));
     assert!(content.contains("impl ToolMeta for HelloWorld"));
     assert!(content.contains("type Output = String;"));
-    assert!(content.contains("_context: &RequestContext"));
+    assert!(content.contains("async fn execute"));
+    assert!(content.contains("_context: RequestContext"));
     assert!(content.contains("#[serde(rename = \"hello_world\")]"));
 }
 
@@ -130,6 +149,7 @@ fn test_formatting_with_quote_newlines() {
         state: "MyState",
         description: Some("Test formatting"),
         instructions: None,
+        runtime: Runtime::Smol,
     };
 
     create_project(&opts, &project_path).expect("Failed to create project");
@@ -161,6 +181,7 @@ fn test_add_tool_functionality() {
         state: "MyState",
         description: Some("Test project"),
         instructions: None,
+        runtime: Runtime::Smol,
     };
 
     create_project(&opts, &project_path).expect("Failed to create project");
