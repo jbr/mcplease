@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/jbr/mcplease/compare/mcplease-cli-v0.3.0...mcplease-cli-v0.4.0) - 2026-10-23
+
+### Added
+
+- [**breaking**] mcplease is async
+
+### Other
+
+- release 0.5
+
 ## [0.3.0] - 2026-08-12
 
 ### Changed
