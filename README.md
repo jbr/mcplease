@@ -1,8 +1,8 @@
 # MCPlease
 
 MCPlease is a lightweight Rust framework for building MCP (Model Context Protocol) servers. It
-provides a simple, macro-driven approach to defining tools, and tracks the `2026-07-28` revision of
-the protocol.
+provides a simple, macro-driven approach to defining tools, optional resources, and a
+transport-independent client, and tracks the `2026-07-28` revision of the protocol.
 
 ## Features
 
@@ -10,6 +10,9 @@ the protocol.
 - **Automatic JSON Schema generation** from Rust structs using `schemars`
 - **Concurrent async dispatch** — calls run alongside each other, with progress
   notifications and cancellation, on whatever runtime your binary brings
+- **Resources** — an optional provider for `resources/list`, `resources/templates/list`, and
+  `resources/read`
+- **Client protocol** that builds requests and classifies replies without doing any I/O
 - **Command-line interface** with automatic help generation via `clap`
 - **Example system** for better tool documentation
 - **Stdio transport** included; the protocol core does no I/O, so any transport can use it
@@ -56,7 +59,7 @@ impl Resources<String> for Catalog {
         -> Result<ReadResourceResult, JsonRpcError>
     {
         if params.uri != "efference://models" {
-            return Err(JsonRpcError::invalid_params("unknown resource URI"));
+            return Err(JsonRpcError::resource_not_found(&params.uri));
         }
         Ok(ReadResourceResult {
             contents: vec![ResourceContents::text(params.uri, cached_text).with_mime_type("text/plain")],
@@ -75,14 +78,54 @@ asynchronous work calls `answer_stateless`, then `answer_tool_call` for `tools/c
 
 Resource requests share stdio's concurrency limit, progress support, cancellation and panic
 handling with tool calls, including when discovery is slow. Errors are JSON-RPC errors, not tool
-`isError` results; a missing resource is `invalid_params` (-32602). Successful results get server
-identity metadata and default to `ttlMs: 0`, `cacheScope: "private"`; providers can supply their
-own cache hints and discovery cursors.
+`isError` results. A missing resource is `JsonRpcError::resource_not_found(uri)`: `-32602` with the
+URI in `data`, never an empty `contents`, which would read as an empty resource. Successful results
+get server identity metadata and default to `ttlMs: 0`, `cacheScope: "private"`; providers can
+supply their own cache hints and discovery cursors.
 
 URI strings pass through unchanged. Providers own routing and query parsing; resource URI templates
 are RFC 6570 metadata, not registered routes. Discovery cursors are separate from any application
-pagination in a URI. Read results can contain multiple text/blob contents. This interface does not
-implement subscriptions, completion, or input-required (MRTR) read responses.
+pagination in a URI. A read result can hold several contents, each built with
+`ResourceContents::text(uri, text)` or `ResourceContents::blob(uri, base64)` and optionally
+`.with_mime_type(..)`. This interface does not implement subscriptions, completion, or
+input-required (MRTR) read responses.
+
+## Client
+
+A client wants `default-features = false, features = ["client"]`. `client::ClientProtocol` builds
+requests and classifies each message that arrives without reading or writing anything, so the same
+code drives a subprocess's pipes or a streamable-HTTP stream; framing, connections, and
+authorization stay with the transport. The [`client` module docs](https://docs.rs/mcplease/latest/mcplease/client/)
+cover version negotiation and the message loop.
+
+Every listing — `tools/list`, `resources/list`, `resources/templates/list` — implements
+`client::Paginated`, so one loop drains any of them:
+
+```rust
+use mcplease::{client::Paginated, types::ListResourcesResult};
+
+let mut resources = Vec::new();
+let mut cursor = None;
+loop {
+    let request = protocol.page::<ListResourcesResult>(cursor.as_deref());
+    // `round_trip` is your transport: write the request, return its result.
+    let page: ListResourcesResult = serde_json::from_value(round_trip(request)?)?;
+    cursor = page.next_cursor().map(String::from);
+    resources.extend(page.into_items());
+    if cursor.is_none() {
+        break;
+    }
+}
+```
+
+`tools_list`, `resources_list`, and `resources_templates_list` build the same requests by name.
+
+`resources_read(uri)` sends the URI exactly as given; expanding a `ResourceTemplate` is the
+caller's job. Its result decodes as `Outcome<ReadResourceResult>`, the same shape as a tool call's
+`ToolCallOutcome`. A missing resource is a protocol error: `-32602` from a current server, or
+`-32002` (`error_codes::RESOURCE_NOT_FOUND`) from one on an earlier revision, so accept both.
+`resources_read_with_progress` opts in to progress notifications, as `tools_call_with_progress`
+does.
 
 ## Quick Start with CLI (Recommended)
 
@@ -135,7 +178,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 fieldwork = "0.4.6"
-mcplease = "0.3.0"
+mcplease = "0.6"
 schemars = "1.0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -425,7 +468,7 @@ stretch — heavy computation, `std::fs`, waiting on a subprocess — moves it t
 
 `calls(reader, writer, state, &config)` is the transport, and the loop in `main` above is the whole
 driver. The stream answers `ping`, `tools/list` and friends itself, and hands out each admitted
-`tools/call` as a `Send + 'static` future. It ends only once the input has closed *and* every call
+`tools/call` (and resource request, when a provider is installed) as a `Send + 'static` future. It ends only once the input has closed *and* every call
 has been answered, so a client that closes stdin and keeps reading gets every response. It yields
 `Err` once if the output fails; dropping it cancels the calls still running.
 
@@ -539,6 +582,12 @@ impl Tool<State> for Render {
                 }),
                 meta: None,
             },
+            ContentBlock::EmbeddedResource {
+                resource: ResourceContents::text("charts://summary", summary)
+                    .with_mime_type("text/markdown"),
+                annotations: None,
+                meta: None,
+            },
         ])
     }
 }
@@ -596,9 +645,12 @@ let config = ServerConfig::new(server_info!())
     .with_tools_ttl_ms(60 * 60 * 1000)
     // Opt in only if the tool list is identical for every user.
     .with_tools_cache_scope(CacheScope::Public)
-    // How many tool calls may run at once. A call past this is refused at
-    // once with `-32000 server busy` rather than queued. Default 16.
-    .with_max_concurrent_calls(16);
+    // How many tool calls and resource requests may run at once. One past
+    // this is refused at once with `-32000 server busy` rather than queued.
+    // Default 16.
+    .with_max_concurrent_calls(16)
+    // Advertise and serve resources from a provider. See [Resources](#resources).
+    .with_resources(Catalog);
 
 let mut calls = mcplease::calls::<Tools, _>(stdin, stdout, state, &config);
 ```
