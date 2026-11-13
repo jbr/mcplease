@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shares their admission limit, cancellation, progress and panic handling. Provider errors are
   protocol errors. Routing and URI interpretation remain with the provider; no subscriptions,
   completion or input-required read flow are advertised.
+- Client resources: `ClientProtocol::resources_list`, `resources_templates_list`, and
+  `resources_read` (plus `_with_progress`). A read decodes as `Outcome<ReadResourceResult>`.
+- `client::Paginated`, implemented by the tools, resources and template listings, and
+  `ClientProtocol::page::<P>(cursor)`, so one loop drains any listing.
+- `JsonRpcError::resource_not_found(uri)` (-32602 naming the URI, as the spec specifies) and
+  `error_codes::RESOURCE_NOT_FOUND` (-32002), the code earlier revisions used, which clients should
+  also accept.
 - Resource wire types: `Resource`, `ResourceTemplate`, `ListResourcesResult`,
   `ListResourceTemplatesResult`, `ReadResourceResult`, `PaginatedRequestParams`, and
   `ReadResourceRequestParams`.
@@ -25,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ResourceContents` variants wrap the new `TextResourceContents` and `BlobResourceContents`
   structs, which carry `_meta`; build them with `ResourceContents::text`/`blob` and
   `with_mime_type`, and read them with `uri()`/`mime_type()`.
+- `ToolCallOutcome` is now an alias for the generic `Outcome<CallToolResult>`, shared with
+  resource reads; variant paths such as `ToolCallOutcome::Complete` are unchanged.
 - `ServerConfig` is generic over its resource provider, defaulting to `NoResources`, so existing
   `ServerConfig` names and `calls::<Tools, _>` / `handle_request::<Tools, State>` calls are
   unchanged. `answer_stateless` gained an inferred type parameter.

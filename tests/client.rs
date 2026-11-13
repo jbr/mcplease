@@ -237,3 +237,39 @@ fn cancel_builds_a_notification_naming_the_request() {
     // A notification carries no `_meta`: there is nothing to correlate.
     assert!(params.get("_meta").is_none());
 }
+
+#[test]
+fn a_resource_read_sends_its_uri_verbatim_with_meta() {
+    let mut protocol = client();
+    let uri = "efference://models?q=a%2fb+%20&limit=3";
+    let request = protocol.resources_read(uri);
+    assert_eq!(request.method, "resources/read");
+    let params = request.params.unwrap();
+    assert_eq!(params["uri"], uri);
+    assert!(
+        params["_meta"]
+            .get("io.modelcontextprotocol/clientInfo")
+            .is_some()
+    );
+    assert!(params["_meta"].get("progressToken").is_none());
+
+    let request = protocol.resources_read_with_progress(uri);
+    let token = &request.params.as_ref().unwrap()["_meta"]["progressToken"];
+    assert_eq!(
+        serde_json::from_value::<RequestId>(token.clone()).unwrap(),
+        request.id
+    );
+}
+
+#[test]
+fn a_listing_page_carries_its_cursor_only_when_continuing() {
+    use mcplease::types::{ListResourceTemplatesResult, ListResourcesResult, ListToolsResult};
+    let mut protocol = client();
+    let first = protocol.page::<ListResourcesResult>(None);
+    assert_eq!(first.method, "resources/list");
+    assert!(first.params.unwrap().get("cursor").is_none());
+    let next = protocol.page::<ListResourceTemplatesResult>(Some("opaque"));
+    assert_eq!(next.method, "resources/templates/list");
+    assert_eq!(next.params.unwrap()["cursor"], "opaque");
+    assert_eq!(protocol.page::<ListToolsResult>(None).method, "tools/list");
+}

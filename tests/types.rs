@@ -333,3 +333,42 @@ fn resource_contents_discriminate_on_text_or_blob() {
     };
     assert!(matches!(resource, ResourceContents::Blob(_)));
 }
+
+#[test]
+fn a_read_outcome_discriminates_on_result_type() {
+    let complete: Outcome<ReadResourceResult> = serde_json::from_value(json!({
+        "resultType": "complete",
+        "contents": [{"uri": "a", "text": "hi"}],
+        "ttlMs": 0,
+        "cacheScope": "private"
+    }))
+    .unwrap();
+    assert!(matches!(complete, Outcome::Complete(_)));
+
+    // Without discrimination this would read as a resource with no contents.
+    let shed: Outcome<ReadResourceResult> = serde_json::from_value(json!({
+        "resultType": "input_required",
+        "requestState": "opaque-blob"
+    }))
+    .unwrap();
+    let Outcome::InputRequired(shed) = shed else {
+        panic!("expected input_required");
+    };
+    assert_eq!(shed.request_state.as_deref(), Some("opaque-blob"));
+
+    // An earlier revision's read: no resultType, no cache hints.
+    let legacy: Outcome<ReadResourceResult> =
+        serde_json::from_value(json!({"contents": [{"uri": "a", "blob": "AA=="}]})).unwrap();
+    let Outcome::Complete(legacy) = legacy else {
+        panic!("absent resultType is complete");
+    };
+    assert!(matches!(legacy.contents[0], ResourceContents::Blob(_)));
+}
+
+#[test]
+fn resource_not_found_is_invalid_params_naming_the_uri() {
+    let error = JsonRpcError::resource_not_found("file:///nope");
+    assert_eq!(error.code, error_codes::INVALID_PARAMS);
+    assert_eq!(error.data, Some(json!({"uri": "file:///nope"})));
+    assert_ne!(error_codes::RESOURCE_NOT_FOUND, error_codes::INVALID_PARAMS);
+}

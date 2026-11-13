@@ -12,7 +12,7 @@
 //! same types parse messages from servers on any revision; the spec directs
 //! clients to treat an absent `resultType` as `"complete"`.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{borrow::Cow, future::pending, sync::Arc};
 use swansong::Swansong;
@@ -164,6 +164,13 @@ pub mod error_codes {
     pub const HEADER_MISMATCH: i64 = -32020;
     pub const MISSING_REQUIRED_CLIENT_CAPABILITY: i64 = -32021;
     pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+    /// What revisions before `2026-07-28` answered a `resources/read` for a
+    /// resource that does not exist. Current servers answer [`INVALID_PARAMS`]
+    /// instead (see [`resource_not_found`]); the spec asks clients to accept
+    /// both.
+    ///
+    /// [`resource_not_found`]: super::JsonRpcError::resource_not_found
+    pub const RESOURCE_NOT_FOUND: i64 = -32002;
 }
 
 /// The error member of an error response.
@@ -197,6 +204,18 @@ impl JsonRpcError {
             code: error_codes::INVALID_PARAMS,
             message: message.into(),
             data: None,
+        }
+    }
+
+    /// The `resources/read` answer for a URI that names no resource:
+    /// [`INVALID_PARAMS`](error_codes::INVALID_PARAMS), with the URI in `data`
+    /// as the spec's example has it. Not an empty `contents`, which the spec
+    /// forbids for a missing resource because it reads as an empty one.
+    pub fn resource_not_found(uri: &str) -> Self {
+        Self {
+            code: error_codes::INVALID_PARAMS,
+            message: format!("resource not found: {uri}"),
+            data: Some(json!({ "uri": uri })),
         }
     }
 
@@ -646,21 +665,26 @@ pub struct InputRequiredResult {
     pub meta: Option<Map<String, Value>>,
 }
 
-/// The two shapes a successful `tools/call` response can take.
+/// The two shapes a successful `tools/call`, `resources/read`, or
+/// `prompts/get` response can take: the result itself, or an interim
+/// [`InputRequiredResult`].
 ///
 /// Discriminated on `resultType`, treating absent as
 /// [`Complete`](ResultType::Complete) per the spec's rule for servers on
 /// earlier revisions. Without this discrimination a client would deserialize an
-/// [`InputRequiredResult`] as a `CallToolResult` with empty `content` and
+/// [`InputRequiredResult`] as, say, a `CallToolResult` with empty `content` and
 /// report a successful empty tool call.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
-pub enum ToolCallOutcome {
-    Complete(CallToolResult),
+pub enum Outcome<T> {
+    Complete(T),
     InputRequired(InputRequiredResult),
 }
 
-impl<'de> Deserialize<'de> for ToolCallOutcome {
+/// A `tools/call` response. See [`Outcome`].
+pub type ToolCallOutcome = Outcome<CallToolResult>;
+
+impl<'de, T: DeserializeOwned> Deserialize<'de> for Outcome<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
