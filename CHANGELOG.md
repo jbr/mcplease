@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-11-13
 
 ### Added
 
@@ -29,11 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `ResourceContents` variants wrap the new `TextResourceContents` and `BlobResourceContents`
-  structs, which carry `_meta`; build them with `ResourceContents::text`/`blob` and
-  `with_mime_type`, and read them with `uri()`/`mime_type()`.
-- `ToolCallOutcome` is now an alias for the generic `Outcome<CallToolResult>`, shared with
-  resource reads; variant paths such as `ToolCallOutcome::Complete` are unchanged.
+- **Breaking:** `ResourceContents` variants are now tuple variants wrapping the new
+  `TextResourceContents` and `BlobResourceContents` structs, which carry `_meta`. Code that builds
+  or matches `ResourceContents::Text { .. }` / `Blob { .. }` — including a tool returning
+  `ContentBlock::EmbeddedResource` — builds them with `ResourceContents::text`/`blob` and
+  `with_mime_type`, reads them with `uri()`/`mime_type()`, or matches `ResourceContents::Text(text)`.
+  The wire format is unchanged.
+- **Breaking:** `ToolCallOutcome` is now an alias for the generic `Outcome<CallToolResult>`, shared
+  with resource reads. Paths such as `ToolCallOutcome::Complete(..)` still construct and match, but
+  variants cannot be imported through an alias: `use types::ToolCallOutcome::{Complete, ..}`
+  becomes `use types::Outcome::{Complete, ..}`.
 - `ServerConfig` is generic over its resource provider, defaulting to `NoResources`, so existing
   `ServerConfig` names and `calls::<Tools, _>` / `handle_request::<Tools, State>` calls are
   unchanged. `answer_stateless` gained an inferred type parameter.
