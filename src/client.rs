@@ -32,8 +32,9 @@
 use crate::types::{
     CacheScope, ClientCapabilities, DiscoverResult, Implementation, InitializeRequestParams,
     InitializeResult, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, LATEST_HANDSHAKE_PROTOCOL_VERSION, LATEST_PROTOCOL_VERSION, ProgressToken,
-    RequestId, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, meta_keys,
+    JsonRpcResponse, LATEST_HANDSHAKE_PROTOCOL_VERSION, LATEST_PROTOCOL_VERSION,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, ProgressToken, RequestId,
+    Resource, ResourceTemplate, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, Tool, meta_keys,
 };
 use serde_json::{Map, Value, json};
 
@@ -198,10 +199,48 @@ impl ClientProtocol {
         JsonRpcNotification::new(method, params)
     }
 
+    /// One page of the listing whose result is `P`, continuing from `cursor`
+    /// when given. See [`Paginated`] for draining a listing with one loop.
+    pub fn page<P: Paginated>(&mut self, cursor: Option<&str>) -> JsonRpcRequest {
+        let params = cursor.map(|cursor| json!({ "cursor": cursor }));
+        self.request(P::METHOD, params)
+    }
+
     /// `tools/list`, optionally continuing a paginated listing.
     pub fn tools_list(&mut self, cursor: Option<&str>) -> JsonRpcRequest {
-        let params = cursor.map(|cursor| json!({ "cursor": cursor }));
-        self.request("tools/list", params)
+        self.page::<ListToolsResult>(cursor)
+    }
+
+    /// `resources/list`, optionally continuing a paginated listing.
+    pub fn resources_list(&mut self, cursor: Option<&str>) -> JsonRpcRequest {
+        self.page::<ListResourcesResult>(cursor)
+    }
+
+    /// `resources/templates/list`, optionally continuing a paginated listing.
+    pub fn resources_templates_list(&mut self, cursor: Option<&str>) -> JsonRpcRequest {
+        self.page::<ListResourceTemplatesResult>(cursor)
+    }
+
+    /// [`resources_read`](Self::resources_read), opting in to progress
+    /// notifications. See [`request_with_progress`](Self::request_with_progress).
+    pub fn resources_read_with_progress(&mut self, uri: &str) -> JsonRpcRequest {
+        self.request_with_progress("resources/read", Some(json!({ "uri": uri })))
+    }
+
+    /// `resources/read` of `uri`, sent exactly as given: expanding a
+    /// [`ResourceTemplate`]'s RFC 6570 template into a URI is the caller's.
+    ///
+    /// The result decodes as
+    /// [`Outcome<ReadResourceResult>`](crate::types::Outcome). A resource that
+    /// does not exist is a protocol error,
+    /// [`INVALID_PARAMS`](crate::types::error_codes::INVALID_PARAMS) — or
+    /// [`RESOURCE_NOT_FOUND`](crate::types::error_codes::RESOURCE_NOT_FOUND)
+    /// from a server on an earlier revision.
+    ///
+    /// Like [`tools_call`](Self::tools_call), this builds the first attempt
+    /// only; a multi round-trip retry is built with [`request`](Self::request).
+    pub fn resources_read(&mut self, uri: &str) -> JsonRpcRequest {
+        self.request("resources/read", Some(json!({ "uri": uri })))
     }
 
     /// [`tools_call`](Self::tools_call), opting in to progress notifications.
@@ -328,6 +367,77 @@ fn classify_notification(notification: JsonRpcNotification) -> Reaction {
             log::debug!("ignoring server notification {other}");
             Reaction::Ignore
         }
+    }
+}
+
+/// A page of a paginated listing, so that one loop can drain any of them:
+///
+/// ```ignore
+/// let mut resources = Vec::new();
+/// let mut cursor = None;
+/// loop {
+///     let request = protocol.page::<ListResourcesResult>(cursor.as_deref());
+///     let page: ListResourcesResult = serde_json::from_value(transport.round_trip(request)?)?;
+///     cursor = page.next_cursor().map(String::from);
+///     resources.extend(page.into_items());
+///     if cursor.is_none() {
+///         break;
+///     }
+/// }
+/// ```
+///
+/// A cursor is opaque and belongs to the listing that issued it; it is
+/// unrelated to any pagination an application encodes in a resource URI.
+pub trait Paginated {
+    /// The method that lists these.
+    const METHOD: &'static str;
+    /// What one page lists.
+    type Item;
+    /// Where the next page starts; `None` on the last page.
+    fn next_cursor(&self) -> Option<&str>;
+    /// This page's items.
+    fn into_items(self) -> Vec<Self::Item>;
+}
+
+impl Paginated for ListToolsResult {
+    type Item = Tool;
+
+    const METHOD: &'static str = "tools/list";
+
+    fn next_cursor(&self) -> Option<&str> {
+        self.next_cursor.as_deref()
+    }
+
+    fn into_items(self) -> Vec<Tool> {
+        self.tools
+    }
+}
+
+impl Paginated for ListResourcesResult {
+    type Item = Resource;
+
+    const METHOD: &'static str = "resources/list";
+
+    fn next_cursor(&self) -> Option<&str> {
+        self.next_cursor.as_deref()
+    }
+
+    fn into_items(self) -> Vec<Resource> {
+        self.resources
+    }
+}
+
+impl Paginated for ListResourceTemplatesResult {
+    type Item = ResourceTemplate;
+
+    const METHOD: &'static str = "resources/templates/list";
+
+    fn next_cursor(&self) -> Option<&str> {
+        self.next_cursor.as_deref()
+    }
+
+    fn into_items(self) -> Vec<ResourceTemplate> {
+        self.resource_templates
     }
 }
 
