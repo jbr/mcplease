@@ -26,6 +26,12 @@
 //! request's [`RequestContext`](types::RequestContext); everything a tool can
 //! say mid-call goes through there.
 //!
+//! Resources are optional: implement [`Resources`] and install it with
+//! [`ServerConfig::with_resources`]; every entry point then advertises and
+//! serves it. Discovery and reads receive shared state and request context
+//! and run concurrently with tool calls. URI routing belongs to the provider;
+//! the library preserves requested URI strings unchanged.
+//!
 //! A *client* wants `default-features = false, features = ["client"]`: the
 //! [`client`] module, which is the same split from the other side — it builds
 //! requests and classifies the messages that arrive, and leaves framing,
@@ -47,7 +53,11 @@ mod cli;
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "server")]
+mod resources;
+#[cfg(feature = "server")]
 mod server;
+#[cfg(feature = "server")]
+pub use resources::{NoResources, Resources};
 #[cfg(feature = "stdio")]
 mod stdio;
 
@@ -71,8 +81,8 @@ pub use serde;
 pub use serde_json;
 #[cfg(feature = "server")]
 pub use server::{
-    DEFAULT_MAX_CONCURRENT_CALLS, DEFAULT_TOOLS_TTL_MS, ServerConfig, answer_stateless,
-    answer_tool_call, handle_request,
+    DEFAULT_MAX_CONCURRENT_CALLS, DEFAULT_TOOLS_TTL_MS, ServerConfig, answer_resource_request,
+    answer_stateless, answer_tool_call, handle_request,
 };
 #[cfg(feature = "stdio")]
 pub use stdio::{Call, Calls, ConnectionNotifier, calls};

@@ -14,6 +14,8 @@ use mcplease::{
 };
 use serde_json::json;
 
+mod resources;
+
 #[derive(Clone)]
 pub struct State {
     pub greeting: String,

@@ -13,6 +13,7 @@
 mod connection;
 mod logging;
 mod pipe;
+mod resources;
 
 use anyhow::Result;
 use async_channel::{Receiver as Parked, Sender as Release, bounded};
