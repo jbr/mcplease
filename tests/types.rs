@@ -273,3 +273,63 @@ mod claude_channel {
         assert_eq!(event.meta().keys().collect::<Vec<_>>(), ["run_id2"]);
     }
 }
+
+#[test]
+fn resource_discovery_wire_types_roundtrip() {
+    let list = json!({
+        "resources": [{"name":"models", "title":"Models", "uri":"efference://models", "mimeType":"text/plain", "size":42,
+            "annotations":{"audience":["assistant"]}, "_meta":{"custom":true}}],
+        "nextCursor":"opaque", "ttlMs":100, "cacheScope":"private", "resultType":"complete", "_meta":{"custom":"value"}
+    });
+    assert_eq!(roundtrip::<ListResourcesResult>(list.clone()), list);
+    let templates = json!({"resourceTemplates":[{"name":"models", "uriTemplate":"efference://models{?q,limit,offset}", "mimeType":"text/plain"}], "ttlMs":0, "cacheScope":"public"});
+    assert_eq!(
+        roundtrip::<ListResourceTemplatesResult>(templates.clone()),
+        templates
+    );
+}
+
+#[test]
+fn resource_read_wire_types_roundtrip() {
+    let params = json!({"uri":"custom:raw%2f?q=+", "inputResponses":{"one":{"value":true}}, "requestState":"opaque", "_meta":{"progressToken":42}});
+    assert_eq!(
+        roundtrip::<ReadResourceRequestParams>(params.clone()),
+        params
+    );
+    let result = json!({"contents":[{"uri":"custom:text", "mimeType":"text/plain", "text":"hello", "_meta":{"line":1}}, {"uri":"custom:blob", "blob":"AA==", "_meta":{"page":2}}], "ttlMs":0, "cacheScope":"private"});
+    assert_eq!(roundtrip::<ReadResourceResult>(result.clone()), result);
+    assert_eq!(
+        serde_json::to_value(PaginatedRequestParams::default()).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn resource_contents_discriminate_on_text_or_blob() {
+    let contents: Vec<ResourceContents> = serde_json::from_value(json!([
+        {"uri": "a", "text": "hello", "_meta": {"line": 1}},
+        {"uri": "b", "mimeType": "image/png", "blob": "AA=="},
+    ]))
+    .unwrap();
+    let [ResourceContents::Text(text), ResourceContents::Blob(blob)] = &contents[..] else {
+        panic!("{contents:?}");
+    };
+    assert_eq!(text.text, "hello");
+    assert_eq!(text.meta.as_ref().unwrap()["line"], 1);
+    assert_eq!(blob.blob, "AA==");
+    assert_eq!(contents[1].uri(), "b");
+    assert_eq!(contents[1].mime_type(), Some("image/png"));
+
+    let built = ResourceContents::text("a", "hello").with_mime_type("text/plain");
+    assert_eq!(
+        serde_json::to_value(&built).unwrap(),
+        json!({"uri": "a", "mimeType": "text/plain", "text": "hello"})
+    );
+    let embedded = json!({"type": "resource", "resource": {"uri": "b", "blob": "AA=="}});
+    let ContentBlock::EmbeddedResource { resource, .. } =
+        serde_json::from_value::<ContentBlock>(embedded).unwrap()
+    else {
+        panic!("not an embedded resource");
+    };
+    assert!(matches!(resource, ResourceContents::Blob(_)));
+}

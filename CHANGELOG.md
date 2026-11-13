@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Resources: implement `Resources<State>` and install it with `ServerConfig::with_resources`.
+  `handle_request`, `calls`, and `answer_stateless` then advertise the `resources` capability and
+  serve `resources/list`, `resources/templates/list`, and `resources/read`; split transports run
+  the latter with `answer_resource_request`. Resource work runs concurrently with tool calls and
+  shares their admission limit, cancellation, progress and panic handling. Provider errors are
+  protocol errors. Routing and URI interpretation remain with the provider; no subscriptions,
+  completion or input-required read flow are advertised.
+- Resource wire types: `Resource`, `ResourceTemplate`, `ListResourcesResult`,
+  `ListResourceTemplatesResult`, `ReadResourceResult`, `PaginatedRequestParams`, and
+  `ReadResourceRequestParams`.
+
+### Changed
+
+- `ResourceContents` variants wrap the new `TextResourceContents` and `BlobResourceContents`
+  structs, which carry `_meta`; build them with `ResourceContents::text`/`blob` and
+  `with_mime_type`, and read them with `uri()`/`mime_type()`.
+- `ServerConfig` is generic over its resource provider, defaulting to `NoResources`, so existing
+  `ServerConfig` names and `calls::<Tools, _>` / `handle_request::<Tools, State>` calls are
+  unchanged. `answer_stateless` gained an inferred type parameter.
+
 ## [0.5.0] - 2026-10-22
 
 ### Changed

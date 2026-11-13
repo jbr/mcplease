@@ -7,6 +7,7 @@
 //! it.
 
 use crate::{
+    resources::{NoResources, Resources},
     traits::{AsToolsList, Dispatch},
     types::{
         CacheScope, CallToolResult, DiscoverResult, Implementation, InitializeResult, JsonRpcError,
@@ -17,7 +18,7 @@ use crate::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 /// How long a client may consider a `tools/list` result fresh.
 ///
@@ -29,13 +30,15 @@ use std::fmt::Debug;
 /// lists genuinely change.
 pub const DEFAULT_TOOLS_TTL_MS: u64 = 60 * 60 * 1000;
 
-/// How many `tools/call` requests a transport runs at once. See
+/// How many stateful requests a transport runs at once. See
 /// [`ServerConfig::with_max_concurrent_calls`].
 pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 16;
 
-/// Everything the serve loop needs beyond the tools themselves.
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
+/// Everything the serve loop needs beyond the tools themselves, including the
+/// optional [`Resources`] provider installed with
+/// [`with_resources`](Self::with_resources).
+#[derive(Debug)]
+pub struct ServerConfig<R = NoResources> {
     server_info: Implementation,
     instructions: Option<&'static str>,
     tools_ttl_ms: u64,
@@ -43,6 +46,23 @@ pub struct ServerConfig {
     max_concurrent_calls: usize,
     experimental: Map<String, Value>,
     logging: bool,
+    resources: Option<Arc<R>>,
+}
+
+// By hand: a derive would require `R: Clone`, and the provider is shared.
+impl<R> Clone for ServerConfig<R> {
+    fn clone(&self) -> Self {
+        Self {
+            server_info: self.server_info.clone(),
+            instructions: self.instructions,
+            tools_ttl_ms: self.tools_ttl_ms,
+            tools_cache_scope: self.tools_cache_scope,
+            max_concurrent_calls: self.max_concurrent_calls,
+            experimental: self.experimental.clone(),
+            logging: self.logging,
+            resources: self.resources.clone(),
+        }
+    }
 }
 
 impl ServerConfig {
@@ -55,9 +75,32 @@ impl ServerConfig {
             max_concurrent_calls: DEFAULT_MAX_CONCURRENT_CALLS,
             experimental: Map::new(),
             logging: false,
+            resources: None,
         }
     }
 
+    /// Install a [`Resources`] provider: advertise the `resources`
+    /// capability and route `resources/list`, `resources/templates/list` and
+    /// `resources/read` to it. Without one, those methods are unknown.
+    ///
+    /// Resource requests run like tool calls — concurrently, cancellable, with
+    /// progress, and counted against
+    /// [`max_concurrent_calls`](Self::with_max_concurrent_calls).
+    pub fn with_resources<R>(self, resources: R) -> ServerConfig<R> {
+        ServerConfig {
+            server_info: self.server_info,
+            instructions: self.instructions,
+            tools_ttl_ms: self.tools_ttl_ms,
+            tools_cache_scope: self.tools_cache_scope,
+            max_concurrent_calls: self.max_concurrent_calls,
+            experimental: self.experimental,
+            logging: self.logging,
+            resources: Some(Arc::new(resources)),
+        }
+    }
+}
+
+impl<R> ServerConfig<R> {
     /// Guidance handed to the model about how to use this server.
     pub fn with_instructions(mut self, instructions: &'static str) -> Self {
         self.instructions = Some(instructions);
@@ -83,7 +126,7 @@ impl ServerConfig {
         self
     }
 
-    /// How many `tools/call` requests may be running at once. A call that
+    /// How many tool calls and resource requests may be running at once. A call that
     /// arrives when this many are already in flight is refused immediately
     /// with [`JsonRpcError::server_busy`] rather than queued, which is what
     /// keeps the bound on work rather than on memory. See
@@ -144,12 +187,13 @@ impl ServerConfig {
         self.logging
     }
 
-    /// What this server advertises: tools, plus logging when declared, plus
-    /// any experimental entries.
+    /// What this server advertises: tools, resources when a provider is
+    /// installed, logging when declared, and any experimental entries.
     fn capabilities(&self) -> ServerCapabilities {
         ServerCapabilities {
             experimental: (!self.experimental.is_empty()).then(|| self.experimental.clone()),
             logging: self.logging.then(|| json!({})),
+            resources: self.resources.is_some().then(Default::default),
             ..ServerCapabilities::tools_only()
         }
     }
@@ -172,9 +216,10 @@ impl ServerConfig {
 /// `server/discover` flow (2026-07-28) work against the same loop.
 ///
 /// This is [`answer_stateless`] followed, for `tools/call`, by
-/// [`answer_tool_call`]. A transport that wants to keep protocol traffic
-/// moving while a tool runs calls the two halves itself, from different
-/// threads; the stdio transport does exactly that.
+/// [`answer_tool_call`] and, for a resource method when `config` has a
+/// provider, by [`answer_resource_request`]. A transport that wants to keep
+/// protocol traffic moving while a tool runs calls the halves itself, from
+/// different threads; the stdio transport does exactly that.
 ///
 /// Returns `None` when the call was cancelled: the spec directs a server not
 /// to respond to a request the client withdrew. A transport with no way to
@@ -184,7 +229,7 @@ pub async fn handle_request<Tools, State>(
     request: JsonRpcRequest,
     state: State,
     context: RequestContext,
-    config: &ServerConfig,
+    config: &ServerConfig<impl Resources<State>>,
 ) -> Option<JsonRpcResponse>
 where
     Tools: Debug + AsToolsList + Dispatch<State>,
@@ -192,14 +237,18 @@ where
 {
     match answer_stateless(&request, &Tools::tools_list(), config) {
         Some(response) => Some(response),
-        None => answer_tool_call::<Tools, State>(request, state, context, config).await,
+        None if request.method == "tools/call" => {
+            answer_tool_call::<Tools, State>(request, state, context, config).await
+        }
+        None => answer_resource_request(request, state, context, config).await,
     }
 }
 
 /// Answer a request that needs no tool state: `initialize`,
 /// `server/discover`, `ping`, `tools/list`, `logging/setLevel` when the server
-/// declared logging, and any unknown method. Returns `None` for `tools/call`,
-/// which is the one request that does.
+/// declared logging, and any unknown method. Returns `None` for `tools/call`
+/// and, when `config` has a [`Resources`] provider, for the resource methods:
+/// the requests that need state and may take time.
 ///
 /// `logging/setLevel` is validated and acknowledged here and recorded nowhere:
 /// the level belongs to a connection, which this function does not have. The
@@ -209,10 +258,10 @@ where
 /// transport can hand this to a thread that never names the tools; the list
 /// is fixed for the life of the process, so computing
 /// [`AsToolsList::tools_list`] once and passing it here is exact.
-pub fn answer_stateless(
+pub fn answer_stateless<R>(
     request: &JsonRpcRequest,
     tools: &[Tool],
-    config: &ServerConfig,
+    config: &ServerConfig<R>,
 ) -> Option<JsonRpcResponse> {
     let JsonRpcRequest {
         id, method, params, ..
@@ -289,6 +338,11 @@ pub fn answer_stateless(
             },
         ),
         "tools/call" => return None,
+        "resources/list" | "resources/templates/list" | "resources/read"
+            if config.resources.is_some() =>
+        {
+            return None;
+        }
         _ => JsonRpcResponse::error(id, JsonRpcError::method_not_found(method)),
     };
     Some(response)
@@ -313,7 +367,7 @@ pub async fn answer_tool_call<Tools, State>(
     request: JsonRpcRequest,
     state: State,
     context: RequestContext,
-    config: &ServerConfig,
+    config: &ServerConfig<impl Resources<State>>,
 ) -> Option<JsonRpcResponse>
 where
     Tools: Debug + Dispatch<State> + DeserializeOwned,
@@ -375,4 +429,76 @@ where
     }
 
     Some(response)
+}
+
+/// Answer a resource request with the provider installed in `config`.
+///
+/// Provider errors become protocol errors, not tool results. Successful
+/// results keep the provider's cache hints and `_meta`; absent hints default
+/// to immediately stale and private, and server identity is stamped into
+/// `_meta`. Returns `None` after cancellation, just like
+/// [`answer_tool_call`].
+///
+/// Any other method, or any request when `config` has no provider, is
+/// answered with method-not-found; route with [`answer_stateless`] first.
+pub async fn answer_resource_request<State>(
+    request: JsonRpcRequest,
+    state: State,
+    context: RequestContext,
+    config: &ServerConfig<impl Resources<State>>,
+) -> Option<JsonRpcResponse>
+where
+    State: Clone + Send + Sync + 'static,
+{
+    use crate::types::{PaginatedRequestParams, ReadResourceRequestParams};
+    let JsonRpcRequest {
+        id, method, params, ..
+    } = request;
+    let Some(provider) = config.resources.as_deref() else {
+        return Some(JsonRpcResponse::error(
+            id,
+            JsonRpcError::method_not_found(&method),
+        ));
+    };
+    let value = params.unwrap_or_else(|| json!({}));
+    macro_rules! run {
+        ($params:ty, $method:ident) => {
+            match serde_json::from_value::<$params>(value) {
+                Err(error) => Err(JsonRpcError::invalid_params(error.to_string())),
+                Ok(params) => {
+                    provider
+                        .$method(state, params, context.clone())
+                        .await
+                        .map(|mut result| {
+                            result.ttl_ms.get_or_insert(0);
+                            result.cache_scope.get_or_insert(CacheScope::Private);
+                            result.result_type.get_or_insert(ResultType::Complete);
+                            result
+                                .meta
+                                .get_or_insert_default()
+                                .extend(config.result_meta().unwrap_or_default());
+                            serde_json::to_value(result)
+                                .expect("resource result is JSON serializable")
+                        })
+                }
+            }
+        };
+    }
+    let result = match method.as_str() {
+        "resources/list" => run!(PaginatedRequestParams, list),
+        "resources/templates/list" => run!(PaginatedRequestParams, list_templates),
+        "resources/read" => run!(ReadResourceRequestParams, read),
+        _ => Err(JsonRpcError::method_not_found(&method)),
+    };
+    if context.is_cancelled() {
+        log::debug!("dropping the response to a cancelled request");
+        return None;
+    }
+    Some(match result {
+        Ok(result) => JsonRpcResponse::success(id, result),
+        Err(error) => {
+            log::error!("{method} failed: {error}");
+            JsonRpcResponse::error(id, error)
+        }
+    })
 }

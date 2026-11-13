@@ -22,6 +22,68 @@ stdio transport runs over any `futures-lite` `AsyncRead`/`AsyncWrite` pair — s
 tokio's stdio through `async-compat` — and hands out each tool call as a self-contained future for
 the binary to spawn. `mcplease create --runtime smol|tokio` writes that `main` for you.
 
+## Resources
+
+Resources are optional. Implement `Resources<State>` to serve `resources/list`,
+`resources/templates/list`, and `resources/read`, and install it on the config; every entry point
+then advertises the `resources` capability and routes those methods to it. The provider is a value,
+so it can carry its own configuration beside the shared `State` each request receives.
+
+```rust
+use mcplease::{Resources, ServerConfig, types::*};
+
+struct Catalog;
+impl Resources<String> for Catalog {
+    async fn list(&self, _: String, _: PaginatedRequestParams, _: RequestContext)
+        -> Result<ListResourcesResult, JsonRpcError>
+    {
+        Ok(ListResourcesResult {
+            resources: vec![Resource {
+                name: "models".into(), uri: "efference://models".into(),
+                mime_type: Some("text/plain".into()), ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+
+    async fn list_templates(&self, _: String, _: PaginatedRequestParams, _: RequestContext)
+        -> Result<ListResourceTemplatesResult, JsonRpcError>
+    {
+        Ok(ListResourceTemplatesResult::default())
+    }
+
+    async fn read(&self, cached_text: String, params: ReadResourceRequestParams, _: RequestContext)
+        -> Result<ReadResourceResult, JsonRpcError>
+    {
+        if params.uri != "efference://models" {
+            return Err(JsonRpcError::invalid_params("unknown resource URI"));
+        }
+        Ok(ReadResourceResult {
+            contents: vec![ResourceContents::text(params.uri, cached_text).with_mime_type("text/plain")],
+            ..Default::default()
+        })
+    }
+}
+
+let config = ServerConfig::new(info).with_resources(Catalog);
+let mut calls = mcplease::calls::<Tools, _>(reader, writer, state, &config);
+```
+
+`handle_request` takes the same config. A transport that splits immediate protocol work from
+asynchronous work calls `answer_stateless`, then `answer_tool_call` for `tools/call` or
+`answer_resource_request` for the resource methods.
+
+Resource requests share stdio's concurrency limit, progress support, cancellation and panic
+handling with tool calls, including when discovery is slow. Errors are JSON-RPC errors, not tool
+`isError` results; a missing resource is `invalid_params` (-32602). Successful results get server
+identity metadata and default to `ttlMs: 0`, `cacheScope: "private"`; providers can supply their
+own cache hints and discovery cursors.
+
+URI strings pass through unchanged. Providers own routing and query parsing; resource URI templates
+are RFC 6570 metadata, not registered routes. Discovery cursors are separate from any application
+pagination in a URI. Read results can contain multiple text/blob contents. This interface does not
+implement subscriptions, completion, or input-required (MRTR) read responses.
+
 ## Quick Start with CLI (Recommended)
 
 The fastest way to get started is with the mcplease CLI tool:

@@ -46,7 +46,8 @@
 //! set with `logging/setLevel`, and every level before the client set one.
 
 use crate::{
-    server::{ServerConfig, answer_stateless, answer_tool_call},
+    resources::Resources,
+    server::{ServerConfig, answer_resource_request, answer_stateless, answer_tool_call},
     traits::{AsToolsList, Dispatch},
     types::{
         JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
@@ -97,6 +98,10 @@ const BACKLOG: usize = 64;
 /// itself, and each admitted call comes out as a [`Call`], a `Send + 'static`
 /// future that runs the tool and queues its response.
 ///
+/// When `config` has a [`Resources`] provider (see
+/// [`ServerConfig::with_resources`]), resource requests are admitted and
+/// handed out as [`Call`]s exactly like tool calls.
+///
 /// The stream ends only once the input has ended *and* every call it handed
 /// out has finished and been written, so a client that closes its end of the
 /// input and keeps reading still gets every answer. An input error counts as
@@ -133,7 +138,7 @@ pub fn calls<Tools, State>(
     reader: impl AsyncRead + Send + 'static,
     writer: impl AsyncWrite + Send + 'static,
     state: State,
-    config: &ServerConfig,
+    config: &ServerConfig<impl Resources<State> + 'static>,
 ) -> Calls
 where
     Tools: Debug + AsToolsList + Dispatch<State>,
@@ -156,7 +161,7 @@ where
     let tools = Tools::tools_list();
     let shared_for_reading = Arc::clone(&shared);
     let receive =
-        move |line: &str| receive::<Tools, State>(line, &tools, &state, &shared_for_reading);
+        move |line: &str| receive::<Tools, State, _>(line, &tools, &state, &shared_for_reading);
 
     Calls {
         reading: Some(Reading {
@@ -286,7 +291,7 @@ impl Drop for Calls {
     }
 }
 
-/// One admitted `tools/call`: run it to run the tool and queue its response.
+/// One admitted tool call or resource request: run it and queue its response.
 ///
 /// Boxed so that [`Calls`] and `Call` are plain names a host can store and
 /// spawn — one allocation per call, beside the parsing and serialization
@@ -314,9 +319,9 @@ impl Future for Call {
 
 /// What the reader and every call share. The last of them to drop closes the
 /// output queue.
-struct Shared {
+struct Shared<R> {
     output: Output,
-    config: ServerConfig,
+    config: ServerConfig<R>,
     /// One guard per admitted call, so its guard count is the number running.
     /// Never shut down.
     running: Swansong,
@@ -328,7 +333,7 @@ struct Shared {
     log_filter: Arc<LogFilter>,
 }
 
-impl Shared {
+impl<R> Shared<R> {
     fn connection_notifier(&self) -> ConnectionNotifier {
         ConnectionNotifier {
             output: self.output.0.downgrade(),
@@ -339,16 +344,17 @@ impl Shared {
 }
 
 /// Handle one line of input, answering it directly unless it is an admitted
-/// `tools/call`.
-fn receive<Tools, State>(
+/// tool call or resource request.
+fn receive<Tools, State, R>(
     line: &str,
     tools: &[Tool],
     state: &State,
-    shared: &Arc<Shared>,
+    shared: &Arc<Shared<R>>,
 ) -> Option<Call>
 where
     Tools: Debug + AsToolsList + Dispatch<State>,
     State: Clone + Send + Sync + 'static,
+    R: Resources<State> + 'static,
 {
     if line.trim().is_empty() {
         return None;
@@ -399,7 +405,7 @@ where
                 JsonRpcError::invalid_request("request id is already in use"),
             )
         }
-        None => return Some(start::<Tools, State>(request, state.clone(), shared)),
+        None => return Some(start::<Tools, State, R>(request, state.clone(), shared)),
     };
 
     if request.method == "initialize" {
@@ -416,10 +422,11 @@ where
 /// its slot, its registration, its handle on the output — is owned by the
 /// future, so it is released however the future ends: finished, cancelled,
 /// or dropped unpolled.
-fn start<Tools, State>(request: JsonRpcRequest, state: State, shared: &Arc<Shared>) -> Call
+fn start<Tools, State, R>(request: JsonRpcRequest, state: State, shared: &Arc<Shared<R>>) -> Call
 where
     Tools: Debug + Dispatch<State>,
     State: Clone + Send + Sync + 'static,
+    R: Resources<State> + 'static,
 {
     let guard = shared.running.guard();
     let cancellation = shared.cancellation.child();
@@ -439,14 +446,17 @@ where
             }))
             .with_connection_notifier(Arc::new(shared.connection_notifier()))
             .with_cancellation(cancellation.clone());
-        let answer = AssertUnwindSafe(cancellation.interrupt(answer_tool_call::<Tools, State>(
-            request,
-            state,
-            context,
-            &shared.config,
-        )))
-        .catch_unwind()
-        .await;
+        let is_tool = request.method == "tools/call";
+        let work = async {
+            if is_tool {
+                answer_tool_call::<Tools, State>(request, state, context, &shared.config).await
+            } else {
+                answer_resource_request(request, state, context, &shared.config).await
+            }
+        };
+        let answer = AssertUnwindSafe(cancellation.interrupt(work))
+            .catch_unwind()
+            .await;
 
         let response = match answer {
             // `None` twice over: interrupted at an await point, or finished
@@ -454,11 +464,17 @@ where
             // say nothing.
             Ok(answer) => answer.flatten(),
             Err(panic) => {
-                log::error!("tool call {id:?} panicked: {}", panic_message(&*panic));
-                cancellation
-                    .state()
-                    .is_running()
-                    .then(|| JsonRpcResponse::error(id, JsonRpcError::internal("tool panicked")))
+                log::error!("request {id:?} panicked: {}", panic_message(&*panic));
+                cancellation.state().is_running().then(|| {
+                    JsonRpcResponse::error(
+                        id,
+                        JsonRpcError::internal(if is_tool {
+                            "tool panicked"
+                        } else {
+                            "resource handler panicked"
+                        }),
+                    )
+                })
             }
         };
 

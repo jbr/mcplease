@@ -350,7 +350,7 @@ pub struct ServerCapabilities {
 }
 
 impl ServerCapabilities {
-    /// Capabilities advertising tools only — what this crate's serve loop offers.
+    /// Capabilities advertising tools only.
     pub fn tools_only() -> Self {
         Self {
             tools: Some(ToolsCapability::default()),
@@ -1168,25 +1168,99 @@ impl ContentBlock {
     }
 }
 
-/// The contents of an embedded resource: textual or binary.
+/// The contents of a resource — returned by `resources/read`, or embedded in
+/// a [`ContentBlock::EmbeddedResource`] — textual or binary.
+///
+/// Discriminated by which of `text` and `blob` is present. Build one with
+/// [`text`](Self::text) or [`blob`](Self::blob), or from either struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResourceContents {
-    #[serde(rename_all = "camelCase")]
-    Text {
-        uri: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        mime_type: Option<String>,
-        text: String,
-    },
-    #[serde(rename_all = "camelCase")]
-    Blob {
-        uri: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        mime_type: Option<String>,
-        /// Base64-encoded binary data.
-        blob: String,
-    },
+    Text(TextResourceContents),
+    Blob(BlobResourceContents),
+}
+
+impl ResourceContents {
+    /// Text contents of the resource at `uri`.
+    pub fn text(uri: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::Text(TextResourceContents {
+            uri: uri.into(),
+            text: text.into(),
+            ..TextResourceContents::default()
+        })
+    }
+
+    /// Binary contents of the resource at `uri`; `blob` is already
+    /// base64-encoded.
+    pub fn blob(uri: impl Into<String>, blob: impl Into<String>) -> Self {
+        Self::Blob(BlobResourceContents {
+            uri: uri.into(),
+            blob: blob.into(),
+            ..BlobResourceContents::default()
+        })
+    }
+
+    /// Declare the MIME type.
+    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
+        *match &mut self {
+            Self::Text(text) => &mut text.mime_type,
+            Self::Blob(blob) => &mut blob.mime_type,
+        } = Some(mime_type.into());
+        self
+    }
+
+    /// The URI these contents belong to.
+    pub fn uri(&self) -> &str {
+        match self {
+            Self::Text(text) => &text.uri,
+            Self::Blob(blob) => &blob.uri,
+        }
+    }
+
+    /// The MIME type, if declared.
+    pub fn mime_type(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => text.mime_type.as_deref(),
+            Self::Blob(blob) => blob.mime_type.as_deref(),
+        }
+    }
+}
+
+impl From<TextResourceContents> for ResourceContents {
+    fn from(text: TextResourceContents) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<BlobResourceContents> for ResourceContents {
+    fn from(blob: BlobResourceContents) -> Self {
+        Self::Blob(blob)
+    }
+}
+
+/// Resource contents that can be represented as text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextResourceContents {
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub text: String,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// Binary resource contents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobResourceContents {
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Base64-encoded binary data.
+    pub blob: String,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
 }
 
 /// Client-facing annotations on a content block.
@@ -1209,4 +1283,121 @@ pub struct Example<T> {
     pub description: &'static str,
     #[serde(flatten)]
     pub item: T,
+}
+
+// --- resources ---
+
+/// A discoverable resource.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resource {
+    pub name: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// RFC 6570 resource template metadata; expansion belongs to the client.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTemplate {
+    pub name: String,
+    pub uri_template: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// Result of a resource discovery request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResourcesResult {
+    pub resources: Vec<Resource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_scope: Option<CacheScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<ResultType>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// Result of a resource discovery request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResourceTemplatesResult {
+    pub resource_templates: Vec<ResourceTemplate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_scope: Option<CacheScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<ResultType>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// Result of a resource read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadResourceResult {
+    pub contents: Vec<ResourceContents>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_scope: Option<CacheScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<ResultType>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// Discovery pagination, independent of any pagination encoded in a resource URI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaginatedRequestParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
+}
+
+/// Resource URI is preserved exactly; this crate does not parse or normalize it.
+/// Continuation fields are passed through, not interpreted by the dispatcher.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadResourceRequestParams {
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_responses: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_state: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
 }
